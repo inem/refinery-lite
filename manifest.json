@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Refinery Lite — ChatGPT → dopo.st",
+  "version": "0.1.0",
+  "description": "Auto-saves every ChatGPT conversation you open to dopo.st as markdown.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://dopo.st/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["tap.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["chatgpt-ui.js", "bridge.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Refinery Lite settings"
+  }
+}

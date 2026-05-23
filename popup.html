@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px -apple-system, system-ui, sans-serif; width: 280px; padding: 14px; }
+    h3   { margin: 0; }
+    .sub { color: #888; margin: 2px 0 10px; }
+    label { display: block; margin: 10px 0 4px; font-weight: 600; }
+    input { width: 100%; box-sizing: border-box; padding: 6px 8px;
+            border: 1px solid #ccc; border-radius: 5px; }
+    button { margin-top: 12px; padding: 6px 16px; border: 0; border-radius: 5px;
+             background: #10a37f; color: #fff; cursor: pointer; }
+    #status { margin-top: 8px; min-height: 16px; color: #10a37f; }
+  </style>
+</head>
+<body>
+  <h3>Refinery Lite</h3>
+  <div class="sub">ChatGPT conversations → dopo.st</div>
+
+  <label for="dopoUrl">dopo.st URL</label>
+  <input id="dopoUrl" type="text" placeholder="https://dopo.st" />
+
+  <label for="token">Token</label>
+  <input id="token" type="password" placeholder="dopo owner token" />
+
+  <button id="save">Save</button>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
