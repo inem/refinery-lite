@@ -102,9 +102,16 @@ async function refreshSidebarBadges() {
     const cid = chat.conversationId;
     if (!cid || !url[cid]) { UI.addChatBadge(chat.element, null); continue; }
 
+    // Direct DOM signal beats any timestamp comparison: if ChatGPT is
+    // showing its update spinner on this chat right now, it's stale.
+    const isSpinning = !!chat.element.querySelector('svg[class*="animate-spin"]');
+
     const stored = updated[cid];
     const live   = latestUpdate.get(cid);
-    const stale  = stored != null && live != null && live > stored + STALE_TOLERANCE_S;
+    // `(stored || 0)` handles chats synced before synced_update tracking
+    // landed — any bump from the spinner poll still triggers stale.
+    const stale  = isSpinning ||
+                   (live != null && live > (stored || 0) + STALE_TOLERANCE_S);
 
     UI.addChatBadge(
       chat.element,
