@@ -31,32 +31,26 @@ let currentConvId = null;
 // seconds, floor). Populated by LIST intercepts; lives in memory only.
 const latestUpdate = new Map();
 
-// Chats that had ChatGPT's native sidebar "updating" spinner on the last
-// poll. When the spinner disappears, the chat just received an update —
-// we bump its latestUpdate so stale comparison fires immediately, without
-// waiting for ChatGPT to re-fetch /backend-api/conversations (which it
-// rarely does on its own).
-let wasSpinning = new Set();
-
+// Detect chat activity via ChatGPT's native sidebar spinner. Seeing the
+// spinner at all means that chat has advanced past our last sync — bump
+// latestUpdate immediately so the stale comparison fires straight away.
+// We bump on every poll-while-spinning, so the freshness survives after
+// the spinner disappears (until the user opens that chat to resync).
 function pollSidebarSpinners() {
   if (!UI || typeof UI.getSidebarChats !== 'function') return;
-  const nowSpinning = new Set();
+  let bumped = false;
+  const now = Math.floor(Date.now() / 1000);
   for (const chat of UI.getSidebarChats()) {
-    if (!chat.conversationId) continue;
+    const cid = chat.conversationId;
+    if (!cid) continue;
     if (chat.element.querySelector('svg[class*="animate-spin"]')) {
-      nowSpinning.add(chat.conversationId);
+      if ((latestUpdate.get(cid) || 0) < now) {
+        latestUpdate.set(cid, now);
+        bumped = true;
+      }
     }
   }
-  let changed = false;
-  for (const cid of wasSpinning) {
-    if (!nowSpinning.has(cid)) {
-      // spinner just stopped on this chat — server-side activity finished
-      latestUpdate.set(cid, Math.floor(Date.now() / 1000));
-      changed = true;
-    }
-  }
-  wasSpinning = nowSpinning;
-  if (changed) refreshSidebarBadges();
+  if (bumped) refreshSidebarBadges();
 }
 
 setInterval(pollSidebarSpinners, 1500);
