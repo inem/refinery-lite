@@ -3,11 +3,15 @@
 // Converts an intercepted ChatGPT conversation to markdown (convert.js) and
 // POSTs it to dopo.st. The cross-origin POST runs here: a service-worker
 // fetch with host_permissions is not CORS-restricted. Unchanged
-// conversations are not re-uploaded. The dopo URL is stored per
-// conversation_id and reported back to the originating tab for the bridge
-// to surface as UI feedback.
+// conversations are not re-uploaded. Per conversation_id we keep three
+// things in chrome.storage.local:
+//   - hash_<id>          : content signature of the last successful sync
+//   - url_<id>           : dopo URL of the last successful sync
+//   - synced_update_<id> : update_time (unix seconds floor) of the data
+//                          we synced — the bridge compares it with the
+//                          sidebar list's update_time to flag stale chats.
 
-importScripts('convert.js'); // provides toMarkdown()
+importScripts('convert.js'); // provides toMarkdown(), contentSig()
 
 function hash(str) {
   let h = 5381;
@@ -39,11 +43,20 @@ async function handleUpload(data, tabId) {
   // the same chat. contentSig depends only on message ids + text.
   const sig = hash(contentSig(data));
   const markdown = toMarkdown(data);
-  const hashKey = 'hash_' + convId;
-  const urlKey  = 'url_'  + convId;
+  const hashKey   = 'hash_'          + convId;
+  const urlKey    = 'url_'           + convId;
+  const updateKey = 'synced_update_' + convId;
 
-  const cached = await chrome.storage.local.get([hashKey, urlKey]);
+  const updTs = data.update_time ? Math.floor(data.update_time) : null;
+
+  const cached = await chrome.storage.local.get([hashKey, urlKey, updateKey]);
   if (cached[hashKey] === sig) {
+    // Refresh synced-update even on a skipped upload, so the sidebar ✓
+    // stays current when ChatGPT's update_time drifts without real content
+    // changes (otherwise the chat would show ↻ stale forever).
+    if (updTs && updTs !== cached[updateKey]) {
+      await chrome.storage.local.set({ [updateKey]: updTs });
+    }
     console.log('[refinery-lite] unchanged — skip', convId);
     tell(tabId, { type: 'UPLOAD_DONE', convId, url: cached[urlKey] || null, skipped: true });
     return;
@@ -67,7 +80,11 @@ async function handleUpload(data, tabId) {
     }
     const json = await res.json().catch(() => null);
     const url  = json && json.url;
-    await chrome.storage.local.set({ [hashKey]: sig, [urlKey]: url || cached[urlKey] || null });
+    await chrome.storage.local.set({
+      [hashKey]:   sig,
+      [urlKey]:    url || cached[urlKey] || null,
+      [updateKey]: updTs,
+    });
     console.log('[refinery-lite] uploaded', convId, '→', url);
     tell(tabId, { type: 'UPLOAD_DONE', convId, url });
   } catch (e) {

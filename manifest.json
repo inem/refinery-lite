@@ -22,7 +22,7 @@
     {
       "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
       "js": ["chatgpt-ui.js", "bridge.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ],
   "action": {

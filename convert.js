@@ -90,7 +90,7 @@ function frontmatter(data) {
   const link   = convId ? `https://chatgpt.com/c/${convId}` : '';
 
   const lines = ['---'];
-  lines.push('kind: chatgpt-session');
+  lines.push('kind: chatgpt-export');
   lines.push('source: chatgpt');
   lines.push(`title: ${yamlStr(title)}`);
   if (convId) lines.push(`session-id: ${yamlStr(convId)}`);

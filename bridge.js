@@ -1,25 +1,40 @@
 // Refinery Lite — ISOLATED-world bridge + UI.
 //
 // Relays the conversation JSON from the MAIN-world tap (window.postMessage)
-// to the background worker (chrome.runtime), and shows feedback in ChatGPT's
-// own UI via window.ChatGPTUI (loaded by the manifest before us):
+// to the background worker, and drives the in-page UI via window.ChatGPTUI:
 //
 //   - inline status in the header: "Saving to dopo…" → "Saved → /abc123"
 //   - persistent header button "↗ dopo" that opens the stored dopo URL
 //     for the currently-open conversation
-//   - green ✓ badge in the sidebar next to every chat that's already synced
+//   - sidebar badges, three states:
+//       ✓  green  — synced and current
+//       ↻  amber  — synced but advanced on the server since last sync
+//                   (e.g. continued on mobile); reopen to resync
+//       (nothing) — never synced
 
 const UI = window.ChatGPTUI;
-const STATUS_ID = 'rl-status';
-const BUTTON_ID = 'rl-open';
-const BADGE_OK  = '✓';
-const SYNCED_COLOR = '#10a37f';
+
+const STATUS_ID    = 'rl-status';
+const BUTTON_ID    = 'rl-open';
+const BADGE_OK     = '✓';
+const BADGE_STALE  = '↻';
+const COLOR_OK     = '#10a37f'; // green
+const COLOR_STALE  = '#f59e0b'; // amber
+
+// Tolerance for spurious update_time drift on the server (read-bookkeeping,
+// etc). Real continuations bump update_time by much more than this.
+const STALE_TOLERANCE_S = 30;
 
 let currentConvId = null;
 
-// ---- per-chat URL store -----------------------------------------------------
+// Latest update_time per chat from the sidebar list endpoint (unix
+// seconds, floor). Populated by LIST intercepts; lives in memory only.
+const latestUpdate = new Map();
 
-function urlKey(convId) { return 'url_' + convId; }
+// ---- per-chat storage -------------------------------------------------------
+
+function urlKey   (id) { return 'url_'           + id; }
+function updateKey(id) { return 'synced_update_' + id; }
 
 async function getSavedUrl(convId) {
   if (!convId) return null;
@@ -27,20 +42,10 @@ async function getSavedUrl(convId) {
   return got[urlKey(convId)] || null;
 }
 
-async function syncedConvIds() {
-  const all = await chrome.storage.local.get(null);
-  const set = new Set();
-  for (const k of Object.keys(all)) {
-    if (k.startsWith('url_') && all[k]) set.add(k.slice(4));
-  }
-  return set;
-}
-
 // ---- header button ----------------------------------------------------------
 
 function ensureButton(url) {
   if (!UI || typeof UI.addTopHeaderButton !== 'function') return;
-  // remove an old instance so the onClick captures the fresh url
   const existing = document.querySelector('[data-cgq-id="' + BUTTON_ID + '"]');
   if (existing) existing.remove();
   if (!url) return;
@@ -57,54 +62,80 @@ async function refreshButton() {
   ensureButton(await getSavedUrl(currentConvId));
 }
 
-// ---- sidebar: synced badges -------------------------------------------------
+// ---- sidebar badges ---------------------------------------------------------
 
 async function refreshSidebarBadges() {
   if (!UI || typeof UI.getSidebarChats !== 'function') return;
-  const synced = await syncedConvIds();
+
+  const all = await chrome.storage.local.get(null);
+  const url = {}, updated = {};
+  for (const k of Object.keys(all)) {
+    if (k.startsWith('url_'))                url[k.slice(4)] = all[k];
+    else if (k.startsWith('synced_update_')) updated[k.slice('synced_update_'.length)] = all[k];
+  }
+
   for (const chat of UI.getSidebarChats()) {
-    const ok = chat.conversationId && synced.has(chat.conversationId);
-    UI.addChatBadge(chat.element, ok ? BADGE_OK : null, { color: SYNCED_COLOR });
+    const cid = chat.conversationId;
+    if (!cid || !url[cid]) { UI.addChatBadge(chat.element, null); continue; }
+
+    const stored = updated[cid];
+    const live   = latestUpdate.get(cid);
+    const stale  = stored != null && live != null && live > stored + STALE_TOLERANCE_S;
+
+    UI.addChatBadge(
+      chat.element,
+      stale ? BADGE_STALE : BADGE_OK,
+      { color: stale ? COLOR_STALE : COLOR_OK }
+    );
   }
 }
 
 if (UI && typeof UI.onSidebarChange === 'function') {
-  // fires once at start and on every sidebar mutation (new chat, rename, etc.)
+  // fires once at start and on every sidebar mutation
   UI.onSidebarChange(refreshSidebarBadges, 400);
 }
 
-// refresh whenever storage changes (a new chat just got its url_ key)
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
-  if (Object.keys(changes).some((k) => k.startsWith('url_'))) {
+  if (Object.keys(changes).some((k) =>
+        k.startsWith('url_') || k.startsWith('synced_update_'))) {
     refreshSidebarBadges();
   }
 });
 
-// ---- tap → background -------------------------------------------------------
+// ---- window messages (from MAIN tap) ---------------------------------------
 
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
   const d = event.data;
-  if (!d || d.source !== 'refinery-lite' || d.type !== 'CONVERSATION' || !d.data) return;
+  if (!d || d.source !== 'refinery-lite') return;
 
-  currentConvId = d.data.conversation_id || null;
-
-  if (UI && UI.setInlineStatus) {
-    UI.setInlineStatus('Saving to dopo…', { id: STATUS_ID });
+  if (d.type === 'CONVERSATION' && d.data) {
+    currentConvId = d.data.conversation_id || null;
+    if (UI && UI.setInlineStatus) {
+      UI.setInlineStatus('Saving to dopo…', { id: STATUS_ID });
+    }
+    refreshButton();
+    chrome.runtime
+      .sendMessage({ type: 'UPLOAD', data: d.data })
+      .catch((e) => console.debug('[refinery-lite] sendMessage failed:', e.message));
+    return;
   }
-  refreshButton();
 
-  chrome.runtime
-    .sendMessage({ type: 'UPLOAD', data: d.data })
-    .catch((e) => console.debug('[refinery-lite] sendMessage failed:', e.message));
+  if (d.type === 'LIST' && Array.isArray(d.items)) {
+    for (const it of d.items) {
+      const ts = Math.floor(new Date(it.update_time).getTime() / 1000);
+      if (Number.isFinite(ts)) latestUpdate.set(it.id, ts);
+    }
+    refreshSidebarBadges();
+    return;
+  }
 });
 
-// ---- background → bridge ----------------------------------------------------
+// ---- runtime messages (from background) ------------------------------------
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg || msg.type !== 'UPLOAD_DONE') return;
-  // ignore stale messages for a chat the user has already navigated away from
   if (msg.convId && currentConvId && msg.convId !== currentConvId) return;
 
   if (msg.error) {
