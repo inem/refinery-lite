@@ -170,6 +170,8 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.convId && currentConvId && msg.convId !== currentConvId) return;
 
   if (msg.error) {
+    console.warn('[refinery-lite] upload error:', msg.error,
+                 '(convId:', msg.convId, ')');
     if (UI && UI.updateInlineStatus) UI.updateInlineStatus(STATUS_ID, 'dopo: ' + msg.error);
     if (UI && UI.hideInlineStatus)   UI.hideInlineStatus(STATUS_ID, 4000);
     return;
@@ -185,3 +187,14 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 console.log('[refinery-lite] bridge + UI ready');
+
+// loud warning if token isn't configured — otherwise the only "no token"
+// log lives in the service-worker console, which is easy to miss.
+chrome.storage.sync.get({ token: '' }, (s) => {
+  if (!s.token) {
+    console.warn(
+      '[refinery-lite] no token set — click the extension icon and paste your dopo owner token. ' +
+      'Until then opening a chat does nothing.'
+    );
+  }
+});
