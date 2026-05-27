@@ -54,17 +54,29 @@ function orderedMessages(data) {
     .sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
 }
 
-// One conversation `part` → markdown text. Strings come through verbatim.
-// Non-string parts (image_asset_pointer / audio_asset_pointer / ...) are
-// rendered as italic placeholders that show what was there and a stable
-// identifier — placeholder only, the binary isn't fetched (yet).
-function partToText(p) {
+// Pull the ChatGPT file_id from an asset_pointer like "file-service://file-XXX".
+function pointerToId(p) {
+  return (p && p.asset_pointer || '').replace(/^file-service:\/\//, '') || null;
+}
+
+// One conversation `part` → markdown text.
+// If `fileMap` has a sha256 for this asset, emit a `{{file:HEX64}}` token
+// that dopo resolves at render time. Otherwise fall back to a visible
+// italic placeholder so the layout doesn't silently lose the asset.
+function partToText(p, fileMap = {}) {
   if (typeof p === 'string') return p;
   if (!p || typeof p !== 'object') return '';
   const ct = p.content_type || '';
   if (ct.endsWith('_asset_pointer')) {
     const kind = ct.replace('_asset_pointer', '');
-    const id   = (p.asset_pointer || '').replace(/^file-service:\/\//, '') || 'unknown';
+    const id   = pointerToId(p) || 'unknown';
+    const sha  = fileMap[id];
+    if (sha) {
+      // image renders as an inline image; other media renders as a link
+      return kind === 'image'
+        ? `![${kind}](\{{file:${sha}\}})`
+        : `[${kind}](\{{file:${sha}\}})`;
+    }
     const dims = (p.width && p.height) ? ` ${p.width}x${p.height}` : '';
     return `_[${kind}: ${id}${dims}]_`;
   }
@@ -72,26 +84,63 @@ function partToText(p) {
   return '';
 }
 
-function textOf(content) {
+function textOf(content, fileMap = {}) {
   if (!content) return '';
   if (Array.isArray(content.parts)) {
-    return content.parts.map(partToText).filter(Boolean).join('\n').trim();
+    return content.parts.map((p) => partToText(p, fileMap))
+      .filter(Boolean).join('\n').trim();
   }
   if (typeof content.text === 'string') return content.text.trim();
   return '';
 }
 
-// User-uploaded files often live in message.metadata.attachments rather
-// than (or in addition to) content.parts. Surface them as a bullet list
-// under the message body. Placeholder only — no fetch yet.
-function attachmentsOf(message) {
+// User-uploaded files live in message.metadata.attachments. With a known
+// sha256 we render a real markdown link; otherwise an italic placeholder.
+function attachmentsOf(message, fileMap = {}) {
   const atts = message && message.metadata && message.metadata.attachments;
   if (!Array.isArray(atts) || !atts.length) return '';
   return atts.map((a) => {
     const name = a.name || a.id || 'unknown';
     const mime = a.mime_type ? ` · ${a.mime_type}` : '';
+    const sha  = fileMap[a.id];
+    if (sha) return `- [${name}](\{{file:${sha}\}})`;
     return `- _[attachment: ${name}${mime}]_`;
   }).join('\n');
+}
+
+// Inventory of binaries this conversation references, in walk order.
+// background.js uses this to fetch + upload them, then builds fileMap.
+function extractFileRefs(data) {
+  const refs = [];
+  const seen = new Set();
+  const push = (id, fields) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    refs.push({ id, ...fields });
+  };
+  for (const m of orderedMessages(data)) {
+    if (isHidden(m)) continue;
+    const parts = (m.content && m.content.parts) || [];
+    for (const p of parts) {
+      if (p && typeof p === 'object' && (p.content_type || '').endsWith('_asset_pointer')) {
+        push(pointerToId(p), {
+          kind: (p.content_type || '').replace('_asset_pointer', ''),
+          mime: p.metadata && p.metadata.mime_type,
+          source: 'part',
+        });
+      }
+    }
+    const atts = (m.metadata && m.metadata.attachments) || [];
+    for (const a of atts) {
+      push(a.id, {
+        kind: 'attachment',
+        name: a.name,
+        mime: a.mime_type,
+        source: 'attachment',
+      });
+    }
+  }
+  return refs;
 }
 
 // Reasoning summaries. BEST-EFFORT — unverified against a real capture.
@@ -129,7 +178,7 @@ function frontmatter(data) {
   return lines.join('\n') + '\n';
 }
 
-function toMarkdown(data) {
+function toMarkdown(data, fileMap = {}) {
   const title  = (data.title || 'ChatGPT conversation').trim();
   const convId = data.conversation_id || '';
   const link   = convId ? `https://chatgpt.com/c/${convId}` : '';
@@ -148,8 +197,8 @@ function toMarkdown(data) {
     const role = m.author && m.author.role;
 
     if (role === 'user') {
-      const text = textOf(m.content);
-      const atts = attachmentsOf(m);
+      const text = textOf(m.content, fileMap);
+      const atts = attachmentsOf(m, fileMap);
       if (!text && !atts) continue;
       pendingThoughts = [];
       out.push('## Prompt:');
@@ -160,8 +209,8 @@ function toMarkdown(data) {
     } else if (role === 'assistant' || role === 'tool') {
       const thoughts = thoughtsOf(m.content);
       if (thoughts.length) { pendingThoughts.push(...thoughts); continue; }
-      const text = textOf(m.content);
-      const atts = attachmentsOf(m);
+      const text = textOf(m.content, fileMap);
+      const atts = attachmentsOf(m, fileMap);
       if (!text && !atts) continue; // tool calls, empty / streaming nodes
       out.push('## Response:');
       if (m.create_time) out.push(fmtTime(m.create_time));
@@ -200,5 +249,8 @@ function contentSig(data) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { toMarkdown, orderedMessages, textOf, frontmatter, contentSig };
+  module.exports = {
+    toMarkdown, orderedMessages, textOf, frontmatter, contentSig,
+    extractFileRefs, pointerToId,
+  };
 }
