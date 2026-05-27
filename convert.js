@@ -54,16 +54,44 @@ function orderedMessages(data) {
     .sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
 }
 
-// Plain text of a message. Non-string parts (images) are dropped.
-// Returns '' for editable_context / non-text content — those messages
-// then skip naturally.
+// One conversation `part` → markdown text. Strings come through verbatim.
+// Non-string parts (image_asset_pointer / audio_asset_pointer / ...) are
+// rendered as italic placeholders that show what was there and a stable
+// identifier — placeholder only, the binary isn't fetched (yet).
+function partToText(p) {
+  if (typeof p === 'string') return p;
+  if (!p || typeof p !== 'object') return '';
+  const ct = p.content_type || '';
+  if (ct.endsWith('_asset_pointer')) {
+    const kind = ct.replace('_asset_pointer', '');
+    const id   = (p.asset_pointer || '').replace(/^file-service:\/\//, '') || 'unknown';
+    const dims = (p.width && p.height) ? ` ${p.width}x${p.height}` : '';
+    return `_[${kind}: ${id}${dims}]_`;
+  }
+  if (ct) return `_[${ct}]_`;
+  return '';
+}
+
 function textOf(content) {
   if (!content) return '';
   if (Array.isArray(content.parts)) {
-    return content.parts.filter((p) => typeof p === 'string').join('\n').trim();
+    return content.parts.map(partToText).filter(Boolean).join('\n').trim();
   }
   if (typeof content.text === 'string') return content.text.trim();
   return '';
+}
+
+// User-uploaded files often live in message.metadata.attachments rather
+// than (or in addition to) content.parts. Surface them as a bullet list
+// under the message body. Placeholder only — no fetch yet.
+function attachmentsOf(message) {
+  const atts = message && message.metadata && message.metadata.attachments;
+  if (!Array.isArray(atts) || !atts.length) return '';
+  return atts.map((a) => {
+    const name = a.name || a.id || 'unknown';
+    const mime = a.mime_type ? ` · ${a.mime_type}` : '';
+    return `- _[attachment: ${name}${mime}]_`;
+  }).join('\n');
 }
 
 // Reasoning summaries. BEST-EFFORT — unverified against a real capture.
@@ -121,16 +149,20 @@ function toMarkdown(data) {
 
     if (role === 'user') {
       const text = textOf(m.content);
-      if (!text) continue;
+      const atts = attachmentsOf(m);
+      if (!text && !atts) continue;
       pendingThoughts = [];
       out.push('## Prompt:');
       if (m.create_time) out.push(fmtTime(m.create_time));
-      out.push('', text, '');
+      out.push('', text);
+      if (atts) out.push('', atts);
+      out.push('');
     } else if (role === 'assistant' || role === 'tool') {
       const thoughts = thoughtsOf(m.content);
       if (thoughts.length) { pendingThoughts.push(...thoughts); continue; }
       const text = textOf(m.content);
-      if (!text) continue; // tool calls, empty / streaming nodes
+      const atts = attachmentsOf(m);
+      if (!text && !atts) continue; // tool calls, empty / streaming nodes
       out.push('## Response:');
       if (m.create_time) out.push(fmtTime(m.create_time));
       out.push('');
@@ -139,7 +171,9 @@ function toMarkdown(data) {
         out.push('');
         pendingThoughts = [];
       }
-      out.push(text, '');
+      out.push(text);
+      if (atts) out.push('', atts);
+      out.push('');
     }
   }
   const body = out.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
@@ -158,8 +192,9 @@ function contentSig(data) {
     const role = m.author && m.author.role;
     if (role !== 'user' && role !== 'assistant') continue;
     const text = textOf(m.content);
-    if (!text) continue;
-    parts.push((m.id || '') + ':' + text);
+    const atts = attachmentsOf(m);
+    if (!text && !atts) continue;
+    parts.push((m.id || '') + ':' + text + (atts ? '\n' + atts : ''));
   }
   return parts.join('');
 }
