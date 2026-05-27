@@ -31,15 +31,23 @@ let currentConvId = null;
 // seconds, floor). Populated by LIST intercepts; lives in memory only.
 const latestUpdate = new Map();
 
-// Detect chat activity via ChatGPT's native sidebar spinner. Seeing the
-// spinner at all means that chat has advanced past our last sync — bump
-// latestUpdate immediately so the stale comparison fires straight away.
-// We bump on every poll-while-spinning, so the freshness survives after
-// the spinner disappears (until the user opens that chat to resync).
-function pollSidebarSpinners() {
+// Two flavors of activity, both signaled by ChatGPT's `animate-spin` SVG:
+//   1) sidebar chat item spins → that (background) chat just advanced.
+//      Bump latestUpdate so the stale comparison fires straight away;
+//      the freshness survives the spinner disappearing.
+//   2) <main> area spins → the CURRENT chat is being updated (sending,
+//      generating, tools). ChatGPT does not put a sidebar spinner on the
+//      chat you're already on. On the disappearance transition we fetch
+//      the conversation ourselves and push it through the upload pipeline,
+//      so the active chat re-syncs without the user having to navigate.
+
+let wasMainSpinning = false;
+
+function pollSpinners() {
   if (!UI || typeof UI.getSidebarChats !== 'function') return;
   let bumped = false;
   const now = Math.floor(Date.now() / 1000);
+
   for (const chat of UI.getSidebarChats()) {
     const cid = chat.conversationId;
     if (!cid) continue;
@@ -50,10 +58,69 @@ function pollSidebarSpinners() {
       }
     }
   }
+
+  const mainEl = document.querySelector('main');
+  const isMainSpinning = !!(mainEl && mainEl.querySelector('svg[class*="animate-spin"]'));
+  if (wasMainSpinning && !isMainSpinning && currentConvId) {
+    refetchAndResync(currentConvId);  // fire-and-forget
+  }
+  wasMainSpinning = isMainSpinning;
+
   if (bumped) refreshSidebarBadges();
 }
 
-setInterval(pollSidebarSpinners, 1500);
+setInterval(pollSpinners, 1500);
+
+// ---- ChatGPT auth + refetch of the active chat -----------------------------
+
+let cachedAccessToken = null;
+let accessTokenExpiry = 0;
+const refetchInFlight = new Set();
+
+async function getAccessToken(force = false) {
+  if (!force && cachedAccessToken && Date.now() < accessTokenExpiry) {
+    return cachedAccessToken;
+  }
+  const res = await fetch('/api/auth/session'); // same-origin, cookies auto
+  if (!res.ok) throw new Error('auth/session ' + res.status);
+  const j = await res.json();
+  if (!j.accessToken) throw new Error('no accessToken in /api/auth/session');
+  cachedAccessToken = j.accessToken;
+  accessTokenExpiry = j.expires
+    ? new Date(j.expires).getTime() - 60_000
+    : Date.now() + 10 * 60 * 1000;
+  return cachedAccessToken;
+}
+
+// On main-area spinner-stop, ChatGPT itself doesn't re-fetch the conversation
+// (the new turn is already streamed into the page state). We do it ourselves
+// so the active chat picks up its new turn without the user navigating away.
+async function refetchAndResync(convId) {
+  if (!convId || refetchInFlight.has(convId)) return;
+  refetchInFlight.add(convId);
+  try {
+    let token = await getAccessToken();
+    let res = await fetch('/backend-api/conversation/' + convId, {
+      headers: { Authorization: 'Bearer ' + token },
+    });
+    if (res.status === 401) {
+      token = await getAccessToken(true);
+      res = await fetch('/backend-api/conversation/' + convId, {
+        headers: { Authorization: 'Bearer ' + token },
+      });
+    }
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data || !data.mapping) return;
+    chrome.runtime
+      .sendMessage({ type: 'UPLOAD', data })
+      .catch((e) => console.debug('[refinery-lite] refetch sendMessage:', e.message));
+  } catch (e) {
+    console.debug('[refinery-lite] refetch failed:', e.message);
+  } finally {
+    refetchInFlight.delete(convId);
+  }
+}
 
 // ---- per-chat storage -------------------------------------------------------
 
