@@ -54,9 +54,14 @@ function orderedMessages(data) {
     .sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
 }
 
-// Pull the ChatGPT file_id from an asset_pointer like "file-service://file-XXX".
+// Pull the file id from an asset_pointer. ChatGPT uses multiple URI schemes:
+//   file-service://file-XXX         — user uploads
+//   sediment://<id>                 — assistant-generated images (DALL-E / gpt-image)
+//   …possibly others.
+// We strip any `scheme://` prefix and pass the rest as the id.
 function pointerToId(p) {
-  return (p && p.asset_pointer || '').replace(/^file-service:\/\//, '') || null;
+  if (!p || !p.asset_pointer) return null;
+  return p.asset_pointer.replace(/^[a-z][a-z0-9-]*:\/\//, '') || null;
 }
 
 // One conversation `part` → markdown text.

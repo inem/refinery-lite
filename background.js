@@ -108,8 +108,10 @@ async function uploadAllFiles(refs, dopoUrl, dopoToken) {
       r.value.existed ? existed++ : fresh++;
     } else {
       failed++;
+      const ref = refs[results.indexOf(r)];
       console.warn('[refinery-lite] file fetch/upload failed:',
-                   r.reason && r.reason.message);
+                   ref && (ref.id + ' (' + ref.kind + ')'),
+                   '—', r.reason && r.reason.message);
     }
   }
   console.log('[refinery-lite] files:', { existed, fresh, failed, of: refs.length });
