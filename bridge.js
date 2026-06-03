@@ -42,13 +42,24 @@ const latestUpdate = new Map();
 //      so the active chat re-syncs without the user having to navigate.
 
 let wasMainSpinning = false;
+let lastSidebarCount = 0;
 
 function pollSpinners() {
   if (!UI || typeof UI.getSidebarChats !== 'function') return;
   let bumped = false;
   const now = Math.floor(Date.now() / 1000);
 
-  for (const chat of UI.getSidebarChats()) {
+  const chatsList = UI.getSidebarChats();
+  // Detect new chats arriving via lazy-load. onSidebarChange's 400ms debounce
+  // + 100ms cool-down silently drops mutations during rapid scroll, so newly
+  // loaded chats never get their ✓ badge until something else triggers a
+  // refresh. Force one on count change here.
+  if (chatsList.length !== lastSidebarCount) {
+    lastSidebarCount = chatsList.length;
+    bumped = true;
+  }
+
+  for (const chat of chatsList) {
     const cid = chat.conversationId;
     if (!cid) continue;
     if (chat.element.querySelector('svg[class*="animate-spin"]')) {
@@ -392,6 +403,9 @@ async function runWalker(opts = {}) {
       if (UI && UI.getSidebarChats && UI.getSidebarChats().some((c) => c.conversationId)) break;
       await sleep(200);
     }
+    // Force a badge refresh so the user sees the true synced state before
+    // we start — disagreement between walker and sidebar badges is confusing.
+    await refreshSidebarBadges();
 
     while (!stop) {
       // Fresh DOM read every iteration: ChatGPT may shift/insert items.
