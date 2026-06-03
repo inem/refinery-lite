@@ -384,9 +384,9 @@ async function runWalker(opts = {}) {
       await waitForUploadDone(next.conversationId, 8000);
       if (stop) break;
 
-      // Pre-scroll during the countdown so the next iteration's DOM read
-      // is more likely to have the next batch already loaded.
-      scrollNavToBottom();
+      // Do NOT pre-scroll here — ChatGPT keeps the active chat in view
+      // and scrolling to the bottom would jump the user past unvisited
+      // chats. Scrolling happens ONLY when find() runs out of candidates.
       for (let s = pauseSec; s > 0; s--) {
         if (stop) break;
         showWalkerPanel({
