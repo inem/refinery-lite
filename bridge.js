@@ -812,8 +812,122 @@ function injectHighlightStyle() {
     mark.refinery-extract:hover {
       background: rgba(245, 158, 11, 0.55);
     }
+    .refinery-extract-controls {
+      display: inline;
+      user-select: none;
+      white-space: nowrap;
+    }
+    .refinery-extract-badge {
+      font-size: 10px;
+      color: #f59e0b;
+      font-weight: 600;
+      cursor: pointer;
+      opacity: 0.8;
+      vertical-align: super;
+      margin-left: 3px;
+      padding: 1px 4px;
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      border-radius: 3px;
+      transition: opacity 120ms ease;
+    }
+    .refinery-extract-badge:hover { opacity: 1; }
+    .refinery-extract-delete {
+      cursor: pointer;
+      opacity: 0.4;
+      font-size: 11px;
+      font-weight: bold;
+      color: #999;
+      vertical-align: super;
+      margin-left: 2px;
+      transition: opacity 120ms ease;
+    }
+    .refinery-extract-delete:hover { opacity: 1; color: #dc2626; }
   `;
   (document.head || document.documentElement).appendChild(style);
+}
+
+// Inline number-badge + × button rendered right after the last <mark> of a
+// piece. Mirrors the old refinery-extract UX. Number is the piece's index
+// in DOM order among current highlights (1, 2, 3…); badge click scrolls to
+// the highlight, × deletes the piece on dopo + unwraps the marks.
+function attachControlsAfter(lastMark, pieceId, dopoPostUrl) {
+  if (!pieceId || !lastMark) return;
+  if (document.querySelector(`.refinery-extract-controls[data-for-piece="${pieceId}"]`)) return;
+
+  const ctrl  = document.createElement('span');
+  ctrl.className     = 'refinery-extract-controls';
+  ctrl.dataset.forPiece = pieceId;
+
+  const badge = document.createElement('span');
+  badge.className = 'refinery-extract-badge';
+  badge.title     = 'Scroll to highlight';
+  badge.addEventListener('mousedown', (e) => e.preventDefault());
+  badge.addEventListener('click', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const m = document.querySelector(`mark.refinery-extract[data-piece-id="${pieceId}"]`);
+    if (m) m.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+
+  const del = document.createElement('span');
+  del.className   = 'refinery-extract-delete';
+  del.textContent = '×';
+  del.title       = 'Remove extract';
+  del.addEventListener('mousedown', (e) => e.preventDefault());
+  del.addEventListener('click', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    deletePiece(pieceId, dopoPostUrl);
+  });
+
+  ctrl.appendChild(badge);
+  ctrl.appendChild(del);
+  lastMark.after(ctrl);
+}
+
+// Walk all highlights in DOM order, give each unique piece-id its 1-based
+// index, write that into the corresponding controls' badge. Cheap enough
+// to call on every add/remove (typical N is dozens, not thousands).
+function renumberBadges() {
+  const marks = document.querySelectorAll('mark.refinery-extract[data-piece-id]');
+  const numFor = new Map();
+  let n = 0;
+  for (const m of marks) {
+    const pid = m.dataset.pieceId;
+    if (numFor.has(pid)) continue;
+    numFor.set(pid, ++n);
+  }
+  document.querySelectorAll('.refinery-extract-controls').forEach((c) => {
+    const pid   = c.dataset.forPiece;
+    const badge = c.querySelector('.refinery-extract-badge');
+    if (badge) badge.textContent = String(numFor.get(pid) || '');
+  });
+}
+
+async function deletePiece(pieceId, dopoPostUrl) {
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'DELETE_PIECE', pieceId, dopoPostUrl,
+    });
+    if (!res || !res.ok) {
+      const why = (res && res.error) || 'failed';
+      console.warn('[refinery-lite] delete failed:', pieceId, why);
+      if (UI && UI.showToast) UI.showToast('Delete: ' + why, { type: 'error' });
+      return;
+    }
+  } catch (e) {
+    if (UI && UI.showToast) UI.showToast('Delete: ' + e.message, { type: 'error' });
+    return;
+  }
+  // Drop controls + unwrap every <mark> for this piece. Replacing the mark
+  // with its children rather than removing it preserves the original text.
+  document.querySelectorAll(`.refinery-extract-controls[data-for-piece="${pieceId}"]`)
+    .forEach((c) => c.remove());
+  document.querySelectorAll(`mark.refinery-extract[data-piece-id="${pieceId}"]`)
+    .forEach((m) => {
+      const parent = m.parentNode;
+      while (m.firstChild) parent.insertBefore(m.firstChild, m);
+      m.remove();
+    });
+  renumberBadges();
 }
 
 // Wrap one Range in <mark>'s — one per intersecting text node so we don't
@@ -872,8 +986,14 @@ function attachMarkClickDelegation() {
 function paintHighlight(range, pieceId, dopoPostUrl) {
   injectHighlightStyle();
   attachMarkClickDelegation();
-  try { return wrapRangeInMarks(range, pieceId, dopoPostUrl); }
-  catch (e) { console.warn('[refinery-lite] paintHighlight:', e.message); return []; }
+  let marks = [];
+  try { marks = wrapRangeInMarks(range, pieceId, dopoPostUrl); }
+  catch (e) { console.warn('[refinery-lite] paintHighlight:', e.message); }
+  if (marks.length) {
+    attachControlsAfter(marks[marks.length - 1], pieceId, dopoPostUrl);
+    renumberBadges();
+  }
+  return marks;
 }
 
 // Same multi-node search as dopo's findTextRange but scoped to ChatGPT's
@@ -939,9 +1059,16 @@ async function restorePieces(convId) {
     if (d.conv && d.conv !== convId) continue;
     const r = findChatRange(d.text, d.occurrence | 0);
     if (!r) continue;
-    if (wrapRangeInMarks(r, p.id, dopoPostUrl).length) painted++;
+    const marks = wrapRangeInMarks(r, p.id, dopoPostUrl);
+    if (marks.length) {
+      attachControlsAfter(marks[marks.length - 1], p.id, dopoPostUrl);
+      painted++;
+    }
   }
-  if (painted) console.log('[refinery-lite] restored', painted, 'piece(s)');
+  if (painted) {
+    renumberBadges();
+    console.log('[refinery-lite] restored', painted, 'piece(s)');
+  }
 }
 
 // Trigger restoration when CONVERSATION fires (tap caught the chat JSON

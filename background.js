@@ -275,7 +275,39 @@ async function handleListPieces(msg) {
   }
 }
 
+// DELETE /<piece-id> — soft-deletes the piece on dopo. Bridge calls this
+// from the inline × on each highlight. Server returns a 302 redirect to /
+// on success; fetch follows it to 200, so any <400 status means ok.
+async function handleDeletePiece(msg) {
+  const { token } = await chrome.storage.sync.get({ token: '' });
+  if (!token)            return { ok: false, error: 'no token' };
+  if (!msg.pieceId)      return { ok: false, error: 'no pieceId' };
+  if (!msg.dopoPostUrl)  return { ok: false, error: 'no parent url (need origin)' };
+  let base;
+  try { base = new URL(msg.dopoPostUrl).origin; }
+  catch (_) { return { ok: false, error: 'bad dopo URL' }; }
+  try {
+    const res = await fetchWithTimeout(`${base}/${msg.pieceId}`, {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer ' + token },
+    }, 15_000);
+    if (res.status >= 400) {
+      const body = await res.text().catch(() => '');
+      return { ok: false, error: 'http ' + res.status + ' ' + body.slice(0, 120) };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'DELETE_PIECE') {
+    handleDeletePiece(msg)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
   if (msg && msg.type === 'LIST_PIECES') {
     handleListPieces(msg)
       .then(sendResponse)
