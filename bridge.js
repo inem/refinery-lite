@@ -421,10 +421,23 @@ async function runWalker(opts = {}) {
     const synced = new Set(Object.keys(all)
       .filter((k) => k.startsWith('url_') && all[k])
       .map((k) => k.slice(4)));
-    // Chats that previously timed out / errored — don't bash them again.
-    const broken = new Set(Object.keys(all)
-      .filter((k) => k.startsWith('broken_') && all[k])
-      .map((k) => k.slice('broken_'.length)));
+    // broken_<cid> stores a unix-seconds timestamp of when the chat last
+    // failed. Walker skips it for BROKEN_RETRY_S after that, then auto-
+    // retries (the chat may have been a transient ChatGPT-side hiccup).
+    // Legacy entries stored as `true` coerce to 1 → instantly expired →
+    // retried on the next run. Background clears the key on a successful
+    // sync, so a self-healed chat goes back to ✓.
+    const broken = new Map();
+    for (const k of Object.keys(all)) {
+      if (k.startsWith('broken_') && all[k]) {
+        broken.set(k.slice('broken_'.length), Number(all[k]) || 0);
+      }
+    }
+    const BROKEN_RETRY_S = 24 * 3600;
+    const brokenRecent = (cid) => {
+      const ts = broken.get(cid);
+      return ts && (Date.now() / 1000 - ts) < BROKEN_RETRY_S;
+    };
 
     const visited = new Set();
     let stop = false;
@@ -450,7 +463,7 @@ async function runWalker(opts = {}) {
       const chats = UI.getSidebarChats().filter((c) => c.conversationId);
       const next = chats.find((c) =>
         !visited.has(c.conversationId) &&
-        !broken.has(c.conversationId) &&
+        !brokenRecent(c.conversationId) &&
         (!onlyUnsynced || !synced.has(c.conversationId))
       );
 
@@ -493,10 +506,13 @@ async function runWalker(opts = {}) {
         failCount++;
         const why = result ? result.error : 'timeout (tap never fired — broken chat?)';
         console.warn('[refinery-lite] walker: failed', next.conversationId, '—', why);
-        // Mark broken in storage so this run won't loop back to it and
-        // future runs won't try it either. The red ✗ badge will appear.
-        broken.add(next.conversationId);
-        try { await chrome.storage.local.set({ ['broken_' + next.conversationId]: true }); }
+        // Mark broken with a fresh timestamp. Walker won't retry within
+        // BROKEN_RETRY_S; after that, this chat gets another chance —
+        // chatGPT-side hiccups self-heal. The red ✗ badge shows until
+        // a successful sync (background.js clears broken_<id> then).
+        const nowTs = Math.floor(Date.now() / 1000);
+        broken.set(next.conversationId, nowTs);
+        try { await chrome.storage.local.set({ ['broken_' + next.conversationId]: nowTs }); }
         catch (_) {}
       }
       if (stop) break;
