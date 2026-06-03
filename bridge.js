@@ -304,6 +304,31 @@ function hideWalkerPanel() {
   if (el) el.remove();
 }
 
+// Find the scrollable ancestor of a sidebar chat element. Cached after first
+// successful lookup — the container is stable across ChatGPT's SPA navigations.
+let cachedScrollable = null;
+function findScrollable() {
+  if (cachedScrollable && document.contains(cachedScrollable)) return cachedScrollable;
+  const chats = UI && UI.getSidebarChats ? UI.getSidebarChats() : [];
+  const seed = chats.length && chats[chats.length - 1].element;
+  if (!seed) return null;
+  let el = seed.parentElement;
+  while (el) {
+    const oy = getComputedStyle(el).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) {
+      cachedScrollable = el;
+      return el;
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function scrollNavToBottom() {
+  const el = findScrollable();
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
 async function runWalker(opts = {}) {
   if (walkerRunning) return;
   walkerRunning = true;
@@ -317,45 +342,71 @@ async function runWalker(opts = {}) {
       .filter((k) => k.startsWith('url_') && all[k])
       .map((k) => k.slice(4)));
 
-    const chats = UI.getSidebarChats()
-      .filter((c) => c.conversationId)
-      .filter((c) => onlyUnsynced ? !synced.has(c.conversationId) : true);
-
-    if (!chats.length) {
-      showWalkerPanel({ title: 'Walker', subtitle: 'Nothing to sync.', onStop: hideWalkerPanel });
-      setTimeout(hideWalkerPanel, 2500);
-      return;
-    }
-
+    const visited = new Set();
     let stop = false;
-    let i = 0;
-    for (; i < chats.length; i++) {
-      if (stop) break;
-      const c = chats[i];
+    let count = 0;
+    let lastTitle = '';
+
+    while (!stop) {
+      // Fresh DOM read every iteration: ChatGPT may shift/insert items.
+      const chats = UI.getSidebarChats().filter((c) => c.conversationId);
+      const next = chats.find((c) =>
+        !visited.has(c.conversationId) &&
+        (!onlyUnsynced || !synced.has(c.conversationId))
+      );
+
+      if (!next) {
+        // Try to load more chats by scrolling. One short wait, one longer
+        // retry on slow networks before concluding the bottom is reached.
+        const before = chats.length;
+        scrollNavToBottom();
+        await sleep(800);
+        let after = UI.getSidebarChats().length;
+        if (after === before) {
+          scrollNavToBottom();
+          await sleep(1500);
+          after = UI.getSidebarChats().length;
+        }
+        if (after === before) break; // genuinely at the end
+        continue;                    // new items appeared — retry the find
+      }
+
+      visited.add(next.conversationId);
+      count++;
+      lastTitle = next.title || next.conversationId;
+
       showWalkerPanel({
-        title: `Syncing ${i + 1} / ${chats.length}`,
-        subtitle: c.title || c.conversationId,
+        title: `Syncing ${count} · ${lastTitle.slice(0, 40)}`,
+        subtitle: 'opening chat…',
         onStop: () => { stop = true; },
       });
-      c.element.click();
-      await waitForUploadDone(c.conversationId, 8000);
+      next.element.click();
+      await waitForUploadDone(next.conversationId, 8000);
       if (stop) break;
+
+      // Pre-scroll during the countdown so the next iteration's DOM read
+      // is more likely to have the next batch already loaded.
+      scrollNavToBottom();
       for (let s = pauseSec; s > 0; s--) {
         if (stop) break;
         showWalkerPanel({
-          title: `${i + 1} / ${chats.length} done`,
-          subtitle: `Next in ${s}s · ${c.title || ''}`,
+          title: `${count} done · ${lastTitle.slice(0, 40)}`,
+          subtitle: `Next in ${s}s`,
           onStop: () => { stop = true; },
         });
         await sleep(1000);
       }
     }
 
-    showWalkerPanel({
-      title: stop ? 'Stopped' : 'Done',
-      subtitle: stop ? `Stopped at ${i + 1}/${chats.length}` : `Synced ${chats.length} chats`,
-      onStop: hideWalkerPanel,
-    });
+    if (!count) {
+      showWalkerPanel({ title: 'Walker', subtitle: 'Nothing to sync.', onStop: hideWalkerPanel });
+    } else {
+      showWalkerPanel({
+        title: stop ? 'Stopped' : 'Done',
+        subtitle: stop ? `Stopped after ${count} chats` : `Synced ${count} chats`,
+        onStop: hideWalkerPanel,
+      });
+    }
     setTimeout(hideWalkerPanel, 4000);
   } finally {
     walkerRunning = false;
