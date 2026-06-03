@@ -657,20 +657,31 @@ function findAssistantMessage(node) {
   return null;
 }
 
-// 0-based index of which occurrence of `text` inside `msgEl` the selection
-// starts at. Lets the dopo restorer disambiguate when the same phrase appears
-// multiple times in the same reply.
-function occurrenceOf(msgEl, range, text) {
-  if (!msgEl || !text) return 0;
+// 0-based index of which occurrence of `text` IN THE WHOLE CONVERSATION the
+// selection starts at. Dopo's restorer text-searches its own rendered <article>
+// for the same N-th occurrence — so the count has to match across DOMs.
+//
+// We scope to the message containers (each <div data-message-author-role>)
+// rather than <main>, because <main> also carries ChatGPT's input box,
+// suggestion chips, etc. — text that isn't in dopo's render and would shift
+// the count.
+function chatOccurrence(msgEl, range, text) {
+  if (!text) return 0;
+  let before = '';
+  const all = document.querySelectorAll('[data-message-author-role]');
+  for (const m of all) {
+    if (m === msgEl) break;
+    before += (m.innerText || m.textContent || '');
+  }
   try {
     const probe = document.createRange();
     probe.setStart(msgEl, 0);
     probe.setEnd(range.startContainer, range.startOffset);
-    const before = probe.toString();
-    let occ = 0, idx = -1;
-    while ((idx = before.indexOf(text, idx + 1)) !== -1) occ++;
-    return occ;
-  } catch (_) { return 0; }
+    before += probe.toString();
+  } catch (_) { /* selection in a detached subtree — give up */ }
+  let occ = 0, idx = -1;
+  while ((idx = before.indexOf(text, idx + 1)) !== -1) occ++;
+  return occ;
 }
 
 function installExtractButton() {
@@ -722,7 +733,7 @@ async function handleExtractClick(text, range, dopoPostUrl) {
     return;
   }
   const mid = msgEl.dataset.messageId || null;
-  const occ = occurrenceOf(msgEl, range, text);
+  const occ = chatOccurrence(msgEl, range, text);
   const rangePayload = JSON.stringify({
     kind: 'chatgpt-selection',
     conv: currentConvId,
