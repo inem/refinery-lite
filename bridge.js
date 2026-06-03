@@ -347,7 +347,13 @@ function findScrollable() {
 // the last chat (block:end), and dispatch a synthetic scroll event.
 function scrollNavToBottom() {
   const el = findScrollable();
-  if (!el) return;
+  if (!el) {
+    console.warn('[refinery-lite] walker: scroll skipped — no scrollable container found');
+    return;
+  }
+  console.log('[refinery-lite] walker: scrolling',
+              { scrollHeight: el.scrollHeight, clientHeight: el.clientHeight,
+                scrollTopBefore: el.scrollTop });
   el.scrollTop = el.scrollHeight;
   const chats = UI && UI.getSidebarChats ? UI.getSidebarChats() : [];
   const last = chats[chats.length - 1];
@@ -399,16 +405,27 @@ async function runWalker(opts = {}) {
         // Try to load more chats by scrolling. One short wait, one longer
         // retry on slow networks before concluding the bottom is reached.
         const before = chats.length;
+        const unvisitedSynced = chats.filter((c) =>
+          !visited.has(c.conversationId) && synced.has(c.conversationId)).length;
+        console.log('[refinery-lite] walker: no next candidate',
+                    { loaded: before, visited: visited.size,
+                      alreadySyncedInList: unvisitedSynced,
+                      onlyUnsynced });
         scrollNavToBottom();
         await sleep(800);
         let after = UI.getSidebarChats().length;
         if (after === before) {
+          console.log('[refinery-lite] walker: scroll #1 added nothing, retrying with 1500ms');
           scrollNavToBottom();
           await sleep(1500);
           after = UI.getSidebarChats().length;
         }
-        if (after === before) break; // genuinely at the end
-        continue;                    // new items appeared — retry the find
+        if (after === before) {
+          console.log('[refinery-lite] walker: scroll exhausted, ending', { final: after });
+          break;
+        }
+        console.log('[refinery-lite] walker: loaded more chats', { from: before, to: after });
+        continue;
       }
 
       visited.add(next.conversationId);
