@@ -24,6 +24,17 @@ function tell(tabId, payload) {
   chrome.tabs.sendMessage(tabId, payload).catch(() => { /* tab gone — ignore */ });
 }
 
+// fetch() has NO default timeout. Anything we don't wrap can hang forever
+// (slow S3 signed-URL, stuck dopo POST, dead chatgpt API) — and walker's
+// waitForUploadDone has no signal until its own timeout fires. Wrap every
+// outbound fetch here so handleUpload is bounded.
+function fetchWithTimeout(url, opts, timeoutMs) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  return fetch(url, { ...(opts || {}), signal: ctrl.signal })
+    .finally(() => clearTimeout(t));
+}
+
 // ===== ChatGPT auth & file fetch ============================================
 
 let cachedAccessToken = null;
@@ -33,9 +44,9 @@ async function getAccessToken(force = false) {
   if (!force && cachedAccessToken && Date.now() < accessTokenExpiry) {
     return cachedAccessToken;
   }
-  const res = await fetch('https://chatgpt.com/api/auth/session', {
+  const res = await fetchWithTimeout('https://chatgpt.com/api/auth/session', {
     credentials: 'include',
-  });
+  }, 10_000);
   if (!res.ok) throw new Error('auth/session ' + res.status);
   const j = await res.json();
   if (!j.accessToken) throw new Error('no accessToken in /api/auth/session');
@@ -47,15 +58,16 @@ async function getAccessToken(force = false) {
 }
 
 async function chatgptFileMeta(fileId) {
+  const metaUrl = 'https://chatgpt.com/backend-api/files/' + fileId + '/download';
   let token = await getAccessToken();
-  let res = await fetch('https://chatgpt.com/backend-api/files/' + fileId + '/download', {
+  let res = await fetchWithTimeout(metaUrl, {
     headers: { Authorization: 'Bearer ' + token },
-  });
+  }, 15_000);
   if (res.status === 401) {
     token = await getAccessToken(true); // force-refresh
-    res = await fetch('https://chatgpt.com/backend-api/files/' + fileId + '/download', {
+    res = await fetchWithTimeout(metaUrl, {
       headers: { Authorization: 'Bearer ' + token },
-    });
+    }, 15_000);
   }
   if (!res.ok) throw new Error('file meta ' + res.status);
   return res.json(); // typically { download_url, file_name, mime_type, ... }
@@ -65,7 +77,7 @@ async function fetchChatGPTBlob(fileId) {
   const meta = await chatgptFileMeta(fileId);
   const url = meta.download_url || meta.url;
   if (!url) throw new Error('no download_url for ' + fileId);
-  const r = await fetch(url);
+  const r = await fetchWithTimeout(url, {}, 30_000);
   if (!r.ok) throw new Error('download ' + r.status);
   const blob = await r.blob();
   const mime = meta.mime_type || meta.mimetype || blob.type || 'application/octet-stream';
@@ -76,14 +88,14 @@ async function fetchChatGPTBlob(fileId) {
 
 async function dopoUpload(blob, mime, dopoUrl, token) {
   const base = (dopoUrl || 'https://dopo.st').replace(/\/+$/, '');
-  const res = await fetch(base + '/upload', {
+  const res = await fetchWithTimeout(base + '/upload', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + token,
       'Content-Type': mime || 'application/octet-stream',
     },
     body: blob,
-  });
+  }, 30_000);
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error('upload ' + res.status + ' ' + body.slice(0, 120));
@@ -198,7 +210,54 @@ async function handleUpload(data, tabId) {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender) => {
+// POST /<parent>/piece — body {text, range, title?}. Server creates a real
+// post (kind=piece) anchored to the parent chat. The `range` is opaque JSON
+// here; the dopo-side restorer will read it back at view-time to draw the
+// in-chat highlight once the text-anchor branch lands in render.clj.
+async function handleExtract(msg) {
+  const { token } = await chrome.storage.sync.get({ token: '' });
+  if (!token) return { ok: false, error: 'no token' };
+  if (!msg.dopoPostUrl) return { ok: false, error: 'chat not synced yet' };
+
+  let base, postId;
+  try {
+    const u = new URL(msg.dopoPostUrl);
+    base   = u.origin;
+    postId = u.pathname.replace(/^\/+|\/+$/g, '');
+  } catch (_) { return { ok: false, error: 'bad dopo URL' }; }
+  if (!postId) return { ok: false, error: 'bad dopo URL' };
+
+  try {
+    const res = await fetchWithTimeout(`${base}/${postId}/piece`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization:  'Bearer ' + token,
+      },
+      body: JSON.stringify({ text: msg.text, range: msg.range, title: msg.title }),
+    }, 15_000);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { ok: false, error: 'http ' + res.status + ' ' + body.slice(0, 120) };
+    }
+    const json = await res.json().catch(() => null);
+    console.log('[refinery-lite] piece created', json && json.id, 'for', msg.convId);
+    return { ok: true, id: json && json.id };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'EXTRACT') {
+    // sendResponse is async-only when we return true below. Background's
+    // other handlers are fire-and-forget, so this is the only branch that
+    // needs the response channel kept open.
+    handleExtract(msg)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
   if (msg && msg.type === 'UPLOAD' && msg.data) {
     const convId = msg.data.conversation_id || 'unknown';
     const tabId  = sender && sender.tab && sender.tab.id;

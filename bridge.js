@@ -628,6 +628,135 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === 'START_WALKER') runWalker(msg.opts || {});
 });
 
+// ---- extract: turn a selection in a ChatGPT reply into a dopo piece -------
+//
+// The button is gated on the active chat already being synced (url_<id> set
+// in storage). If the chat hasn't synced yet the popup just shows ChatGPT's
+// native buttons — no point letting the user save a quote that has no parent
+// post to attach to.
+//
+// The range we send is intentionally opaque text-anchor JSON rather than the
+// XPath that dopo's own quote-extractor uses. ChatGPT's DOM is React-rendered
+// and bears no resemblance to dopo's markdown render, so an XPath computed
+// here would not restore on dopo. The eventual dopo-side restorer will read
+// {kind, mid, occurrence, text} and re-locate the highlight by text-search
+// inside the matching assistant turn.
+
+const EXTRACT_BTN_ID = 'rl-extract';
+const SELECTION_POPUP_SEL  = '.aria-live\\=polite.fixed';
+const SELECTION_BTN_BAR    = '.flex.overflow-hidden';
+
+// Closest ChatGPT assistant message ancestor (the React node carries both
+// data-message-author-role="assistant" and data-message-id).
+function findAssistantMessage(node) {
+  let el = node && (node.nodeType === Node.TEXT_NODE ? node.parentElement : node);
+  while (el && el !== document.body) {
+    if (el.dataset && el.dataset.messageAuthorRole === 'assistant') return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+// 0-based index of which occurrence of `text` inside `msgEl` the selection
+// starts at. Lets the dopo restorer disambiguate when the same phrase appears
+// multiple times in the same reply.
+function occurrenceOf(msgEl, range, text) {
+  if (!msgEl || !text) return 0;
+  try {
+    const probe = document.createRange();
+    probe.setStart(msgEl, 0);
+    probe.setEnd(range.startContainer, range.startOffset);
+    const before = probe.toString();
+    let occ = 0, idx = -1;
+    while ((idx = before.indexOf(text, idx + 1)) !== -1) occ++;
+    return occ;
+  } catch (_) { return 0; }
+}
+
+function installExtractButton() {
+  const observer = new MutationObserver(async () => {
+    const popup = document.querySelector(SELECTION_POPUP_SEL);
+    if (!popup) return;
+    const container = popup.querySelector(SELECTION_BTN_BAR);
+    if (!container) return;
+    if (container.querySelector(`[data-cgq-id="${EXTRACT_BTN_ID}"]`)) return;
+
+    // Gate: only inject when the active chat already has a dopo URL.
+    if (!currentConvId) return;
+    const got = await chrome.storage.local.get(urlKey(currentConvId));
+    const dopoPostUrl = got[urlKey(currentConvId)];
+    if (!dopoPostUrl) return;
+
+    // Popup may have closed during the await — re-check before inserting.
+    if (!document.contains(container)) return;
+    if (container.querySelector(`[data-cgq-id="${EXTRACT_BTN_ID}"]`)) return;
+
+    const btn = document.createElement('button');
+    btn.dataset.cgqId = EXTRACT_BTN_ID;
+    btn.className = 'btn relative btn-secondary shadow-long flex rounded-xl border-none active:opacity-1';
+    btn.innerHTML = `
+      <div class="flex items-center justify-center">
+        <span class="flex items-center gap-1.5 select-none">
+          <span style="font-size:16px;">📑</span>
+          <span class="whitespace-nowrap! select-none max-md:sr-only">Extract</span>
+        </span>
+      </div>`;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const sel   = window.getSelection();
+      const text  = sel ? sel.toString() : '';
+      const range = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+      if (!text || !range) return;
+      handleExtractClick(text, range, dopoPostUrl);
+    });
+    container.appendChild(btn);
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+async function handleExtractClick(text, range, dopoPostUrl) {
+  const msgEl = findAssistantMessage(range.commonAncestorContainer);
+  if (!msgEl) {
+    if (UI && UI.showToast) UI.showToast('Select from an assistant reply', { type: 'error' });
+    return;
+  }
+  const mid = msgEl.dataset.messageId || null;
+  const occ = occurrenceOf(msgEl, range, text);
+  const rangePayload = JSON.stringify({
+    kind: 'chatgpt-selection',
+    conv: currentConvId,
+    mid,
+    occurrence: occ,
+    text,
+  });
+  const title = text.length > 80 ? text.slice(0, 77) + '…' : text;
+
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'EXTRACT',
+      convId: currentConvId,
+      dopoPostUrl,
+      text,
+      range: rangePayload,
+      title,
+    });
+    if (res && res.ok) {
+      if (UI && UI.showToast) UI.showToast('Extracted → dopo');
+    } else {
+      const why = (res && res.error) || 'failed';
+      console.warn('[refinery-lite] extract failed:', why);
+      if (UI && UI.showToast) UI.showToast('Extract: ' + why, { type: 'error' });
+    }
+  } catch (e) {
+    console.warn('[refinery-lite] extract sendMessage threw:', e.message);
+    if (UI && UI.showToast) UI.showToast('Extract: ' + e.message, { type: 'error' });
+  }
+  try { window.getSelection().removeAllRanges(); } catch (_) {}
+}
+
+installExtractButton();
+
 console.log('[refinery-lite] bridge + UI ready');
 
 // loud warning if token isn't configured — otherwise the only "no token"
