@@ -531,29 +531,35 @@ async function runWalker(opts = {}) {
       // backend directly via /api/auth/session → Bearer token → /conv/<id>
       // and pushes the result through the same UPLOAD pipeline.
       const fetched = await refetchAndResync(next.conversationId);
-      // 60s timeout covers: /api/auth/session + /backend-api/conversation
-      // + parse + (per file: chatgpt download → dopo upload, in parallel)
-      // + dopo POST. Generous for very long chats with many attachments.
-      const result = await waitForUploadDone(next.conversationId, 60000);
-      if (result && !result.error) {
-        okCount++;
-      } else if (fetched && !result) {
-        // We DID fetch the conversation and queue UPLOAD; background just
-        // hasn't responded yet (probably slow upload of many files). Do
-        // NOT mark broken — when background finally finishes, it'll clear
-        // any state and the chat will show ✓ on next refresh.
+      if (!fetched) {
+        // Couldn't even get the JSON. Genuinely broken / network / 4xx.
         failCount++;
-        console.warn('[refinery-lite] walker: slow', next.conversationId,
-                     '— UPLOAD queued but no UPLOAD_DONE in 60s; background may still finish');
-      } else {
-        // Genuine failure: refetch couldn't even get the JSON. Mark broken.
-        failCount++;
-        const why = result ? result.error : 'refetch failed before UPLOAD';
-        console.warn('[refinery-lite] walker: failed', next.conversationId, '—', why);
+        console.warn('[refinery-lite] walker: failed', next.conversationId,
+                     '— refetch failed before UPLOAD');
         const nowTs = Math.floor(Date.now() / 1000);
         broken.set(next.conversationId, nowTs);
         try { await chrome.storage.local.set({ ['broken_' + next.conversationId]: nowTs }); }
         catch (_) {}
+      } else {
+        // Wait for background to finish — no shortcuts. Previous code timed
+        // out at 60s and moved on, which only piled MORE UPLOADs into the
+        // service worker queue while it was still chewing the earlier ones.
+        // The whole walker stalled instead of letting any single chat finish.
+        // 5 minutes is generous for the heaviest chat with many files; if
+        // nothing comes back by then something is genuinely stuck. Stop
+        // button still interrupts immediately.
+        const result = await waitForUploadDone(next.conversationId, 5 * 60_000);
+        if (result && !result.error) {
+          okCount++;
+        } else {
+          failCount++;
+          const why = result ? result.error : 'no UPLOAD_DONE in 5min — background stuck?';
+          console.warn('[refinery-lite] walker: failed', next.conversationId, '—', why);
+          const nowTs = Math.floor(Date.now() / 1000);
+          broken.set(next.conversationId, nowTs);
+          try { await chrome.storage.local.set({ ['broken_' + next.conversationId]: nowTs }); }
+          catch (_) {}
+        }
       }
       if (stop) break;
 
