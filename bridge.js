@@ -362,9 +362,6 @@ function scrollNavToBottom() {
     console.warn('[refinery-lite] walker: scroll skipped — no scrollable container found');
     return;
   }
-  console.log('[refinery-lite] walker: scrolling',
-              { scrollHeight: el.scrollHeight, clientHeight: el.clientHeight,
-                scrollTopBefore: el.scrollTop });
   el.scrollTop = el.scrollHeight;
   const chats = UI && UI.getSidebarChats ? UI.getSidebarChats() : [];
   const last = chats[chats.length - 1];
@@ -372,6 +369,31 @@ function scrollNavToBottom() {
     try { last.element.scrollIntoView({ block: 'end' }); } catch (_) {}
   }
   try { el.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {}
+}
+
+// Actively wait for ChatGPT to lazy-load more sidebar chats. Polls every
+// 200ms and re-triggers scroll every ~1s — handles slow networks AND
+// IntersectionObserver sentinels that need a re-nudge after the loading
+// placeholder appears and is replaced by real items.
+async function waitForMoreChats(beforeCount, timeoutMs) {
+  const start = Date.now();
+  let lastNudge = 0;
+  let attempts = 0;
+  while (Date.now() - start < timeoutMs) {
+    const now = UI.getSidebarChats().length;
+    if (now > beforeCount) {
+      console.log('[refinery-lite] walker: scroll triggered load after',
+                  attempts, 'nudges,', Date.now() - start, 'ms');
+      return now;
+    }
+    if (Date.now() - lastNudge > 1000) {
+      scrollNavToBottom();
+      lastNudge = Date.now();
+      attempts++;
+    }
+    await sleep(200);
+  }
+  return UI.getSidebarChats().length;
 }
 
 async function runWalker(opts = {}) {
@@ -416,8 +438,6 @@ async function runWalker(opts = {}) {
       );
 
       if (!next) {
-        // Try to load more chats by scrolling. One short wait, one longer
-        // retry on slow networks before concluding the bottom is reached.
         const before = chats.length;
         const unvisitedSynced = chats.filter((c) =>
           !visited.has(c.conversationId) && synced.has(c.conversationId)).length;
@@ -425,15 +445,7 @@ async function runWalker(opts = {}) {
                     { loaded: before, visited: visited.size,
                       alreadySyncedInList: unvisitedSynced,
                       onlyUnsynced });
-        scrollNavToBottom();
-        await sleep(800);
-        let after = UI.getSidebarChats().length;
-        if (after === before) {
-          console.log('[refinery-lite] walker: scroll #1 added nothing, retrying with 1500ms');
-          scrollNavToBottom();
-          await sleep(1500);
-          after = UI.getSidebarChats().length;
-        }
+        const after = await waitForMoreChats(before, 8000);
         if (after === before) {
           console.log('[refinery-lite] walker: scroll exhausted, ending', { final: after });
           break;
