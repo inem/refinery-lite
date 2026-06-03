@@ -14,12 +14,14 @@
 
 const UI = window.ChatGPTUI;
 
-const STATUS_ID    = 'rl-status';
-const BUTTON_ID    = 'rl-open';
-const BADGE_OK     = '✓';
-const BADGE_STALE  = '↻';
-const COLOR_OK     = '#10a37f'; // green
-const COLOR_STALE  = '#f59e0b'; // amber
+const STATUS_ID     = 'rl-status';
+const BUTTON_ID     = 'rl-open';
+const BADGE_OK      = '✓';
+const BADGE_STALE   = '↻';
+const BADGE_BROKEN  = '✗';
+const COLOR_OK      = '#10a37f'; // green
+const COLOR_STALE   = '#f59e0b'; // amber
+const COLOR_BROKEN  = '#dc2626'; // red
 
 // Tolerance for spurious update_time drift on the server (read-bookkeeping,
 // etc). Real continuations bump update_time by much more than this.
@@ -186,15 +188,25 @@ async function refreshSidebarBadges() {
   if (!UI || typeof UI.getSidebarChats !== 'function') return;
 
   const all = await chrome.storage.local.get(null);
-  const url = {}, updated = {};
+  const url = {}, updated = {}, broken = {};
   for (const k of Object.keys(all)) {
     if (k.startsWith('url_'))                url[k.slice(4)] = all[k];
     else if (k.startsWith('synced_update_')) updated[k.slice('synced_update_'.length)] = all[k];
+    else if (k.startsWith('broken_'))        broken[k.slice('broken_'.length)] = all[k];
   }
 
   for (const chat of UI.getSidebarChats()) {
     const cid = chat.conversationId;
-    if (!cid || !url[cid]) { UI.addChatBadge(chat.element, null); continue; }
+    if (!cid) { UI.addChatBadge(chat.element, null); continue; }
+
+    // Broken trumps everything — show the red ✗ loudly so the user knows
+    // not to expect this chat on dopo (and walker won't retry it).
+    if (broken[cid]) {
+      UI.addChatBadge(chat.element, BADGE_BROKEN, { color: COLOR_BROKEN });
+      continue;
+    }
+
+    if (!url[cid]) { UI.addChatBadge(chat.element, null); continue; }
 
     // Direct DOM signal beats any timestamp comparison: if ChatGPT is
     // showing its update spinner on this chat right now, it's stale.
@@ -223,7 +235,7 @@ if (UI && typeof UI.onSidebarChange === 'function') {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   if (Object.keys(changes).some((k) =>
-        k.startsWith('url_') || k.startsWith('synced_update_'))) {
+        k.startsWith('url_') || k.startsWith('synced_update_') || k.startsWith('broken_'))) {
     refreshSidebarBadges();
   }
 });
@@ -409,6 +421,10 @@ async function runWalker(opts = {}) {
     const synced = new Set(Object.keys(all)
       .filter((k) => k.startsWith('url_') && all[k])
       .map((k) => k.slice(4)));
+    // Chats that previously timed out / errored — don't bash them again.
+    const broken = new Set(Object.keys(all)
+      .filter((k) => k.startsWith('broken_') && all[k])
+      .map((k) => k.slice('broken_'.length)));
 
     const visited = new Set();
     let stop = false;
@@ -434,6 +450,7 @@ async function runWalker(opts = {}) {
       const chats = UI.getSidebarChats().filter((c) => c.conversationId);
       const next = chats.find((c) =>
         !visited.has(c.conversationId) &&
+        !broken.has(c.conversationId) &&
         (!onlyUnsynced || !synced.has(c.conversationId))
       );
 
@@ -476,6 +493,11 @@ async function runWalker(opts = {}) {
         failCount++;
         const why = result ? result.error : 'timeout (tap never fired — broken chat?)';
         console.warn('[refinery-lite] walker: failed', next.conversationId, '—', why);
+        // Mark broken in storage so this run won't loop back to it and
+        // future runs won't try it either. The red ✗ badge will appear.
+        broken.add(next.conversationId);
+        try { await chrome.storage.local.set({ ['broken_' + next.conversationId]: true }); }
+        catch (_) {}
       }
       if (stop) break;
 

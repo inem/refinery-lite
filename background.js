@@ -188,6 +188,8 @@ async function handleUpload(data, tabId) {
       [urlKey]:    url || cached[urlKey] || null,
       [updateKey]: updTs,
     });
+    // Successful sync clears any prior broken flag — chat is alive again.
+    await chrome.storage.local.remove('broken_' + convId).catch(() => {});
     console.log('[refinery-lite] uploaded', convId, '→', url);
     tell(tabId, { type: 'UPLOAD_DONE', convId, url });
   } catch (e) {

@@ -18,7 +18,8 @@ chrome.storage.sync.get({ dopoUrl: 'https://dopo.st', token: '' }, (s) => {
 async function clearChatCache() {
   const all = await chrome.storage.local.get(null);
   const keys = Object.keys(all).filter((k) =>
-    k.startsWith('hash_') || k.startsWith('url_') || k.startsWith('synced_update_')
+    k.startsWith('hash_') || k.startsWith('url_') ||
+    k.startsWith('synced_update_') || k.startsWith('broken_')
   );
   if (keys.length) await chrome.storage.local.remove(keys);
   return keys.length;
