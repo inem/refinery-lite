@@ -772,7 +772,7 @@ async function handleExtractClick(text, range, dopoPostUrl) {
       title,
     });
     if (res && res.ok) {
-      if (UI && UI.showToast) UI.showToast('Extracted → dopo');
+      // No success toast — the <mark> wrap is the confirmation.
       paintHighlight(liveRange, res.id, dopoPostUrl);
     } else {
       const why = (res && res.error) || 'failed';
