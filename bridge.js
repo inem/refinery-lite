@@ -253,6 +253,119 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.url) ensureButton(msg.url);
 });
 
+// ---- walker: auto-sync all chats one by one --------------------------------
+
+let walkerRunning = false;
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function waitForUploadDone(convId, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      chrome.runtime.onMessage.removeListener(listener);
+      resolve(val);
+    };
+    const listener = (msg) => {
+      if (msg && msg.type === 'UPLOAD_DONE' && msg.convId === convId) finish(msg);
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    setTimeout(() => finish(null), timeoutMs);
+  });
+}
+
+function showWalkerPanel({ title, subtitle, onStop }) {
+  let el = document.getElementById('rl-walker');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'rl-walker';
+    Object.assign(el.style, {
+      position: 'fixed', top: '70px', right: '20px', zIndex: '100000',
+      background: '#1f1f1f', color: 'white', padding: '14px 16px',
+      borderRadius: '10px', boxShadow: '0 6px 24px rgba(0,0,0,0.35)',
+      font: '13px -apple-system, system-ui, sans-serif', minWidth: '240px',
+    });
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `
+    <div style="font-weight:600;margin-bottom:4px">${title}</div>
+    <div style="color:#aaa;margin-bottom:10px;font-size:12px">${subtitle}</div>
+    <button id="rl-walker-stop"
+      style="background:#dc2626;color:white;border:0;padding:6px 14px;
+             border-radius:5px;cursor:pointer;font:inherit">Stop</button>
+  `;
+  document.getElementById('rl-walker-stop').onclick = onStop;
+}
+
+function hideWalkerPanel() {
+  const el = document.getElementById('rl-walker');
+  if (el) el.remove();
+}
+
+async function runWalker(opts = {}) {
+  if (walkerRunning) return;
+  walkerRunning = true;
+
+  const onlyUnsynced = opts.onlyUnsynced !== false;
+  const pauseSec = opts.pauseSec || 3;
+
+  try {
+    const all = await chrome.storage.local.get(null);
+    const synced = new Set(Object.keys(all)
+      .filter((k) => k.startsWith('url_') && all[k])
+      .map((k) => k.slice(4)));
+
+    const chats = UI.getSidebarChats()
+      .filter((c) => c.conversationId)
+      .filter((c) => onlyUnsynced ? !synced.has(c.conversationId) : true);
+
+    if (!chats.length) {
+      showWalkerPanel({ title: 'Walker', subtitle: 'Nothing to sync.', onStop: hideWalkerPanel });
+      setTimeout(hideWalkerPanel, 2500);
+      return;
+    }
+
+    let stop = false;
+    let i = 0;
+    for (; i < chats.length; i++) {
+      if (stop) break;
+      const c = chats[i];
+      showWalkerPanel({
+        title: `Syncing ${i + 1} / ${chats.length}`,
+        subtitle: c.title || c.conversationId,
+        onStop: () => { stop = true; },
+      });
+      c.element.click();
+      await waitForUploadDone(c.conversationId, 8000);
+      if (stop) break;
+      for (let s = pauseSec; s > 0; s--) {
+        if (stop) break;
+        showWalkerPanel({
+          title: `${i + 1} / ${chats.length} done`,
+          subtitle: `Next in ${s}s · ${c.title || ''}`,
+          onStop: () => { stop = true; },
+        });
+        await sleep(1000);
+      }
+    }
+
+    showWalkerPanel({
+      title: stop ? 'Stopped' : 'Done',
+      subtitle: stop ? `Stopped at ${i + 1}/${chats.length}` : `Synced ${chats.length} chats`,
+      onStop: hideWalkerPanel,
+    });
+    setTimeout(hideWalkerPanel, 4000);
+  } finally {
+    walkerRunning = false;
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.type === 'START_WALKER') runWalker(msg.opts || {});
+});
+
 console.log('[refinery-lite] bridge + UI ready');
 
 // loud warning if token isn't configured — otherwise the only "no token"

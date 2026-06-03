@@ -24,6 +24,14 @@ async function clearChatCache() {
   return keys.length;
 }
 
+$('walk').addEventListener('click', () => {
+  chrome.runtime.sendMessage({
+    type: 'START_WALKER',
+    opts: { onlyUnsynced: $('onlyUnsynced').checked },
+  });
+  window.close();
+});
+
 $('save').addEventListener('click', async () => {
   const dopoUrl = $('dopoUrl').value.trim() || 'https://dopo.st';
   const token   = $('token').value.trim();

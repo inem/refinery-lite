@@ -200,6 +200,20 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   if (msg && msg.type === 'UPLOAD' && msg.data) {
     handleUpload(msg.data, sender && sender.tab && sender.tab.id);
   }
+  if (msg && msg.type === 'START_WALKER') {
+    // relay from popup → active chatgpt tab's bridge
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      if (!tab || !tab.id) return;
+      const url = tab.url || '';
+      if (!url.includes('chatgpt.com') && !url.includes('chat.openai.com')) {
+        console.warn('[refinery-lite] walker: active tab is not chatgpt');
+        return;
+      }
+      chrome.tabs.sendMessage(tab.id, { type: 'START_WALKER', opts: msg.opts || {} })
+        .catch((e) => console.warn('[refinery-lite] walker send:', e.message));
+    });
+  }
 });
 
 console.log('[refinery-lite] background ready');
