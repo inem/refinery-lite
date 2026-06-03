@@ -332,6 +332,7 @@ function scrollNavToBottom() {
 async function runWalker(opts = {}) {
   if (walkerRunning) return;
   walkerRunning = true;
+  console.log('[refinery-lite] walker started', opts);
 
   const onlyUnsynced = opts.onlyUnsynced !== false;
   const pauseSec = opts.pauseSec || 3;
@@ -346,6 +347,15 @@ async function runWalker(opts = {}) {
     let stop = false;
     let count = 0;
     let lastTitle = '';
+
+    // If we were kicked off from the new-chat page (chatgpt.com/), the
+    // sidebar may not have rendered its list yet. Show a "starting…" panel
+    // so the user sees the walker is alive, then wait up to ~3s for chats.
+    showWalkerPanel({ title: 'Walker', subtitle: 'starting…', onStop: () => { stop = true; } });
+    for (let i = 0; i < 15 && !stop; i++) {
+      if (UI && UI.getSidebarChats && UI.getSidebarChats().some((c) => c.conversationId)) break;
+      await sleep(200);
+    }
 
     while (!stop) {
       // Fresh DOM read every iteration: ChatGPT may shift/insert items.

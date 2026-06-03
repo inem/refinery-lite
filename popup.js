@@ -24,11 +24,17 @@ async function clearChatCache() {
   return keys.length;
 }
 
-$('walk').addEventListener('click', () => {
-  chrome.runtime.sendMessage({
-    type: 'START_WALKER',
-    opts: { onlyUnsynced: $('onlyUnsynced').checked },
-  });
+$('walk').addEventListener('click', async () => {
+  // Await sendMessage before closing — Chrome can drop the message if the
+  // popup window closes before the message is fully serialized.
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'START_WALKER',
+      opts: { onlyUnsynced: $('onlyUnsynced').checked },
+    });
+  } catch (e) {
+    console.warn('[refinery-lite] walker start failed:', e.message);
+  }
   window.close();
 });
 
