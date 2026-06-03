@@ -46,6 +46,11 @@ const latestUpdate = new Map();
 let wasMainSpinning = false;
 let lastSidebarCount = 0;
 
+// ChatGPT rate-limits aggressive /backend-api/conversation/ traffic with 429.
+// Tap surfaces it as a RATE_LIMITED message; we hold a deadline here. The
+// walker stalls until it passes; spinner-stop refetch is also gated on it.
+let rateLimitedUntil = 0;
+
 function pollSpinners() {
   if (!UI || typeof UI.getSidebarChats !== 'function') return;
   let bumped = false;
@@ -74,7 +79,11 @@ function pollSpinners() {
 
   const mainEl = document.querySelector('main');
   const isMainSpinning = !!(mainEl && mainEl.querySelector('svg[class*="animate-spin"]'));
-  if (wasMainSpinning && !isMainSpinning && currentConvId) {
+  // While walker is clicking through chats, ChatGPT itself fetches
+  // /backend-api/conversation/<id> on each navigation and the tap catches
+  // it. A second refetch from here on spinner-stop doubles the rate and
+  // is exactly what was triggering 429s. Skip while walker owns the run.
+  if (wasMainSpinning && !isMainSpinning && currentConvId && !walkerRunning) {
     refetchAndResync(currentConvId);  // fire-and-forget
   }
   wasMainSpinning = isMainSpinning;
@@ -284,6 +293,16 @@ window.addEventListener('message', (event) => {
     return;
   }
 
+  if (d.type === 'RATE_LIMITED') {
+    const seconds = Number(d.retryAfter) || 30;
+    const until = Date.now() + seconds * 1000;
+    if (until > rateLimitedUntil) rateLimitedUntil = until;
+    console.warn('[refinery-lite] rate-limited by ChatGPT — pausing',
+                 seconds, 's (until',
+                 new Date(rateLimitedUntil).toLocaleTimeString() + ')');
+    return;
+  }
+
   if (d.type === 'LIST' && Array.isArray(d.items)) {
     for (const it of d.items) {
       const ts = Math.floor(new Date(it.update_time).getTime() / 1000);
@@ -439,7 +458,11 @@ async function runWalker(opts = {}) {
   console.log('[refinery-lite] walker started', opts);
 
   const onlyUnsynced = opts.onlyUnsynced !== false;
-  const pauseSec = opts.pauseSec || 3;
+  // 5s between chats keeps us under ChatGPT's 429 threshold on big runs.
+  // Manual clicks finish in 1–2s, so the wait is the user's reaction time,
+  // not the bottleneck. Walker also breaks early into longer pauses when a
+  // RATE_LIMITED arrives (see loop below).
+  const pauseSec = opts.pauseSec || 5;
 
   try {
     const all = await chrome.storage.local.get(null);
@@ -484,6 +507,21 @@ async function runWalker(opts = {}) {
     await refreshSidebarBadges();
 
     while (!stop) {
+      // Honour any active rate-limit window first. ChatGPT's 429 means
+      // every conversation fetch is failing — clicking through chats now
+      // just turns them all red. Wait it out, surface a countdown to the
+      // user, then resume on the same `next` candidate.
+      while (!stop && Date.now() < rateLimitedUntil) {
+        const remaining = Math.ceil((rateLimitedUntil - Date.now()) / 1000);
+        showWalkerPanel({
+          title: 'Rate-limited by ChatGPT',
+          subtitle: `paused ${remaining}s · resuming automatically`,
+          onStop: () => { stop = true; },
+        });
+        await sleep(1000);
+      }
+      if (stop) break;
+
       // Fresh DOM read every iteration: ChatGPT may shift/insert items.
       const chats = UI.getSidebarChats().filter((c) => c.conversationId);
       const next = chats.find((c) =>
@@ -530,10 +568,19 @@ async function runWalker(opts = {}) {
       // Direct fetch from ISOLATED world (the previous approach) appears
       // not to behave the same way — manual clicks sync in seconds while
       // refetchAndResync stalled the whole pipeline.
+      const clickAt = Date.now();
       next.element.click();
       const result = await waitForUploadDone(next.conversationId, 30000);
       if (result && !result.error) {
         okCount++;
+      } else if (rateLimitedUntil > clickAt) {
+        // The conversation fetch failed because of a 429, not because the
+        // chat itself is broken. Un-visit so the next loop iteration picks
+        // it up again — after the rate-limit wait at the top of the loop.
+        visited.delete(next.conversationId);
+        attempted--;
+        console.log('[refinery-lite] walker: rate-limited mid-chat',
+                    next.conversationId, '— will retry after pause');
       } else {
         failCount++;
         const why = result ? result.error : 'no UPLOAD_DONE in 30s (tap never fired?)';

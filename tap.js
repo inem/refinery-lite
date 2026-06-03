@@ -31,16 +31,28 @@
     const response = await originalFetch.apply(this, args);
 
     if (CONVERSATION_RE.test(url)) {
-      response.clone().json()
-        .then((data) => {
-          if (data && data.mapping) {
-            window.postMessage(
-              { source: 'refinery-lite', type: 'CONVERSATION', data },
-              '*'
-            );
-          }
-        })
-        .catch(() => { /* not JSON / parse failure — ignore */ });
+      // 429 has no `mapping` — to the walker it looks like "tap never fired"
+      // and the chat gets marked broken. Surface it as a typed signal so the
+      // walker can back off (Retry-After when ChatGPT bothers to send one).
+      if (response.status === 429) {
+        const ra = parseInt(response.headers.get('Retry-After') || '', 10);
+        window.postMessage(
+          { source: 'refinery-lite', type: 'RATE_LIMITED',
+            retryAfter: Number.isFinite(ra) && ra > 0 ? ra : 30 },
+          '*'
+        );
+      } else {
+        response.clone().json()
+          .then((data) => {
+            if (data && data.mapping) {
+              window.postMessage(
+                { source: 'refinery-lite', type: 'CONVERSATION', data },
+                '*'
+              );
+            }
+          })
+          .catch(() => { /* not JSON / parse failure — ignore */ });
+      }
     } else if (LIST_RE.test(url)) {
       response.clone().json()
         .then((data) => {
