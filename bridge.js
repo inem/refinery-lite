@@ -66,7 +66,23 @@ function pollSpinners() {
   }
   wasMainSpinning = isMainSpinning;
 
+  ensureWalkerButton();  // header gets wiped on SPA nav; re-install if missing
+
   if (bumped) refreshSidebarBadges();
+}
+
+// Always-present "Sync all" button in the chat header — twin of the
+// "↗ dopo" button but context-free (no current chat required).
+function ensureWalkerButton() {
+  if (!UI || typeof UI.addTopHeaderButton !== 'function') return;
+  if (document.querySelector('[data-cgq-id="rl-walk"]')) return;
+  UI.addTopHeaderButton({
+    id: 'rl-walk',
+    icon: '⟳',
+    label: 'Sync all',
+    title: 'Sync all unsynced ChatGPT chats to dopo.st',
+    onClick: () => runWalker({ onlyUnsynced: true }),
+  });
 }
 
 setInterval(pollSpinners, 1500);
@@ -384,6 +400,11 @@ async function runWalker(opts = {}) {
       visited.add(next.conversationId);
       count++;
       lastTitle = next.title || next.conversationId;
+
+      // Keep the currently-syncing chat in the user's view — otherwise the
+      // sidebar drifts and you can't tell where the walker is at.
+      try { next.element.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+      catch (_) { /* element detached — happens occasionally on re-render */ }
 
       showWalkerPanel({
         title: `Syncing ${count} · ${lastTitle.slice(0, 40)}`,
