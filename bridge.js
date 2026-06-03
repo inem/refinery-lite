@@ -495,11 +495,18 @@ async function runWalker(opts = {}) {
 
       showWalkerPanel({
         title: `Syncing ${attempted} · ${lastTitle.slice(0, 40)}`,
-        subtitle: 'opening chat…',
+        subtitle: 'fetching…',
         onStop: () => { stop = true; },
       });
-      next.element.click();
-      const result = await waitForUploadDone(next.conversationId, 8000);
+
+      // Headless fetch — we no longer click the chat. ChatGPT sometimes
+      // serves a chat from client-state cache without hitting
+      // /backend-api/conversation/<id>, so tap never fires and the walker
+      // would falsely flag the chat as broken. refetchAndResync calls the
+      // backend directly via /api/auth/session → Bearer token → /conv/<id>
+      // and pushes the result through the same UPLOAD pipeline.
+      refetchAndResync(next.conversationId);
+      const result = await waitForUploadDone(next.conversationId, 12000);
       if (result && !result.error) {
         okCount++;
       } else {
