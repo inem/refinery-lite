@@ -506,10 +506,10 @@ async function runWalker(opts = {}) {
       // backend directly via /api/auth/session → Bearer token → /conv/<id>
       // and pushes the result through the same UPLOAD pipeline.
       refetchAndResync(next.conversationId);
-      // 30s timeout covers: /api/auth/session + /backend-api/conversation
+      // 60s timeout covers: /api/auth/session + /backend-api/conversation
       // + parse + (per file: chatgpt download → dopo upload, in parallel)
-      // + dopo POST. Heavy chats with several large attachments need it.
-      const result = await waitForUploadDone(next.conversationId, 30000);
+      // + dopo POST. Generous for very long chats with many attachments.
+      const result = await waitForUploadDone(next.conversationId, 60000);
       if (result && !result.error) {
         okCount++;
       } else {
