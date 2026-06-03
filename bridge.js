@@ -732,7 +732,12 @@ function installExtractButton() {
     });
     container.appendChild(btn);
   });
-  observer.observe(document.body, { childList: true, subtree: true });
+  // document.body can still be null when the content-script wakes — observed
+  // on chatgpt.com/c/<id> deep-links where the body hasn't been rendered by
+  // the time we run. Defer until it exists.
+  const start = () => observer.observe(document.body, { childList: true, subtree: true });
+  if (document.body) start();
+  else document.addEventListener('DOMContentLoaded', start, { once: true });
 }
 
 async function handleExtractClick(text, range, dopoPostUrl) {
