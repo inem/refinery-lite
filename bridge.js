@@ -340,9 +340,21 @@ function findScrollable() {
   return null;
 }
 
+// Trigger ChatGPT's lazy-load of older chats. setting scrollTop alone is
+// sometimes not enough — the lazy-loader is an IntersectionObserver on a
+// sentinel at the bottom of the list, and observer events sometimes don't
+// fire on programmatic scroll. Triple-tap: scroll container, scrollIntoView
+// the last chat (block:end), and dispatch a synthetic scroll event.
 function scrollNavToBottom() {
   const el = findScrollable();
-  if (el) el.scrollTop = el.scrollHeight;
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  const chats = UI && UI.getSidebarChats ? UI.getSidebarChats() : [];
+  const last = chats[chats.length - 1];
+  if (last && last.element) {
+    try { last.element.scrollIntoView({ block: 'end' }); } catch (_) {}
+  }
+  try { el.dispatchEvent(new Event('scroll', { bubbles: true })); } catch (_) {}
 }
 
 async function runWalker(opts = {}) {
@@ -361,7 +373,9 @@ async function runWalker(opts = {}) {
 
     const visited = new Set();
     let stop = false;
-    let count = 0;
+    let attempted = 0;
+    let okCount = 0;
+    let failCount = 0;
     let lastTitle = '';
 
     // If we were kicked off from the new-chat page (chatgpt.com/), the
@@ -398,7 +412,7 @@ async function runWalker(opts = {}) {
       }
 
       visited.add(next.conversationId);
-      count++;
+      attempted++;
       lastTitle = next.title || next.conversationId;
 
       // Keep the currently-syncing chat in the user's view — otherwise the
@@ -407,12 +421,19 @@ async function runWalker(opts = {}) {
       catch (_) { /* element detached — happens occasionally on re-render */ }
 
       showWalkerPanel({
-        title: `Syncing ${count} · ${lastTitle.slice(0, 40)}`,
+        title: `Syncing ${attempted} · ${lastTitle.slice(0, 40)}`,
         subtitle: 'opening chat…',
         onStop: () => { stop = true; },
       });
       next.element.click();
-      await waitForUploadDone(next.conversationId, 8000);
+      const result = await waitForUploadDone(next.conversationId, 8000);
+      if (result && !result.error) {
+        okCount++;
+      } else {
+        failCount++;
+        const why = result ? result.error : 'timeout (tap never fired — broken chat?)';
+        console.warn('[refinery-lite] walker: failed', next.conversationId, '—', why);
+      }
       if (stop) break;
 
       // Do NOT pre-scroll here — ChatGPT keeps the active chat in view
@@ -420,8 +441,9 @@ async function runWalker(opts = {}) {
       // chats. Scrolling happens ONLY when find() runs out of candidates.
       for (let s = pauseSec; s > 0; s--) {
         if (stop) break;
+        const tally = `${okCount} ok${failCount ? ` · ${failCount} failed` : ''}`;
         showWalkerPanel({
-          title: `${count} done · ${lastTitle.slice(0, 40)}`,
+          title: `${tally} · ${lastTitle.slice(0, 30)}`,
           subtitle: `Next in ${s}s`,
           onStop: () => { stop = true; },
         });
@@ -429,16 +451,18 @@ async function runWalker(opts = {}) {
       }
     }
 
-    if (!count) {
+    if (!attempted) {
       showWalkerPanel({ title: 'Walker', subtitle: 'Nothing to sync.', onStop: hideWalkerPanel });
     } else {
+      const summary = [`${okCount} synced`, failCount && `${failCount} failed`]
+        .filter(Boolean).join(' · ');
       showWalkerPanel({
         title: stop ? 'Stopped' : 'Done',
-        subtitle: stop ? `Stopped after ${count} chats` : `Synced ${count} chats`,
+        subtitle: summary,
         onStop: hideWalkerPanel,
       });
     }
-    setTimeout(hideWalkerPanel, 4000);
+    setTimeout(hideWalkerPanel, 5000);
   } finally {
     walkerRunning = false;
   }
