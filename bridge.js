@@ -128,24 +128,44 @@ async function refetchAndResync(convId) {
   if (!convId || refetchInFlight.has(convId)) return;
   refetchInFlight.add(convId);
   try {
-    let token = await getAccessToken();
-    let res = await fetch('/backend-api/conversation/' + convId, {
-      headers: { Authorization: 'Bearer ' + token },
-    });
-    if (res.status === 401) {
-      token = await getAccessToken(true);
-      res = await fetch('/backend-api/conversation/' + convId, {
-        headers: { Authorization: 'Bearer ' + token },
-      });
+    let token;
+    try {
+      token = await getAccessToken();
+    } catch (e) {
+      console.warn('[refinery-lite] refetch', convId, '— auth/session failed:', e.message);
+      return;
     }
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!data || !data.mapping) return;
+    const url = '/backend-api/conversation/' + convId;
+    let res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    if (res.status === 401) {
+      console.log('[refinery-lite] refetch', convId, '— 401, refreshing token');
+      token = await getAccessToken(true);
+      res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    }
+    if (!res.ok) {
+      console.warn('[refinery-lite] refetch', convId, '— HTTP', res.status, res.statusText);
+      return;
+    }
+    let data;
+    try { data = await res.json(); }
+    catch (e) {
+      console.warn('[refinery-lite] refetch', convId, '— JSON parse failed:', e.message);
+      return;
+    }
+    if (!data) {
+      console.warn('[refinery-lite] refetch', convId, '— null body');
+      return;
+    }
+    if (!data.mapping) {
+      console.warn('[refinery-lite] refetch', convId, '— no .mapping; keys:',
+                   Object.keys(data).slice(0, 10).join(','));
+      return;
+    }
     chrome.runtime
       .sendMessage({ type: 'UPLOAD', data })
-      .catch((e) => console.debug('[refinery-lite] refetch sendMessage:', e.message));
+      .catch((e) => console.warn('[refinery-lite] refetch', convId, '— sendMessage:', e.message));
   } catch (e) {
-    console.debug('[refinery-lite] refetch failed:', e.message);
+    console.warn('[refinery-lite] refetch', convId, '— unexpected:', e.message);
   } finally {
     refetchInFlight.delete(convId);
   }
