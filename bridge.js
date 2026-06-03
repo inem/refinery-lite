@@ -643,8 +643,12 @@ chrome.runtime.onMessage.addListener((msg) => {
 // inside the matching assistant turn.
 
 const EXTRACT_BTN_ID = 'rl-extract';
-const SELECTION_POPUP_SEL  = '.aria-live\\=polite.fixed';
-const SELECTION_BTN_BAR    = '.flex.overflow-hidden';
+// ChatGPT's selection popup. Was `.aria-live=polite.fixed` — late-2026 the
+// popup switched from position:fixed to a translate3d'd absolute container,
+// so `.fixed` no longer matches. The .aria-live=polite class (literal, with
+// the '=' — tailwind arbitrary class) is still the stable handle.
+const SELECTION_POPUP_SEL  = '.aria-live\\=polite';
+const SELECTION_BTN_BAR    = '.shadow-long.flex.overflow-hidden';
 
 // Closest ChatGPT assistant message ancestor (the React node carries both
 // data-message-author-role="assistant" and data-message-id).
@@ -704,12 +708,17 @@ function installExtractButton() {
 
     const btn = document.createElement('button');
     btn.dataset.cgqId = EXTRACT_BTN_ID;
-    btn.className = 'btn relative btn-secondary shadow-long flex rounded-xl border-none active:opacity-1';
+    // Mirror native popup buttons (Ask ChatGPT, Create Note) — radius lives
+    // on the parent wrapper, each button is rounded-none, with a left border
+    // acting as the separator from the previous button.
+    btn.className =
+      'btn relative btn-secondary rounded-none active:opacity-1 '
+      + 'border-y-0 border-e-0 border-s border-solid border-token-border-heavy';
     btn.innerHTML = `
       <div class="flex items-center justify-center">
         <span class="flex items-center gap-1.5 select-none">
-          <span style="font-size:16px;">📑</span>
-          <span class="whitespace-nowrap! select-none max-md:sr-only">Extract</span>
+          <span style="font-size:14px;">📑</span>
+          <span class="whitespace-nowrap select-none">Extract</span>
         </span>
       </div>`;
     btn.addEventListener('click', (e) => {
