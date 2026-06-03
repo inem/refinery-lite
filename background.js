@@ -248,7 +248,40 @@ async function handleExtract(msg) {
   }
 }
 
+// GET /<parent>/pieces — list of extractions made from this chat. Returned
+// to bridge so it can re-paint <mark>'s in the ChatGPT DOM on chat open.
+async function handleListPieces(msg) {
+  const { token } = await chrome.storage.sync.get({ token: '' });
+  if (!token) return { ok: false, error: 'no token' };
+  if (!msg.dopoPostUrl) return { ok: false, error: 'no parent url' };
+
+  let base, postId;
+  try {
+    const u = new URL(msg.dopoPostUrl);
+    base   = u.origin;
+    postId = u.pathname.replace(/^\/+|\/+$/g, '');
+  } catch (_) { return { ok: false, error: 'bad dopo URL' }; }
+  if (!postId) return { ok: false, error: 'bad dopo URL' };
+
+  try {
+    const res = await fetchWithTimeout(`${base}/${postId}/pieces`, {
+      headers: { Authorization: 'Bearer ' + token },
+    }, 15_000);
+    if (!res.ok) return { ok: false, error: 'http ' + res.status };
+    const pieces = await res.json().catch(() => []);
+    return { ok: true, pieces: Array.isArray(pieces) ? pieces : [], base };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'LIST_PIECES') {
+    handleListPieces(msg)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
   if (msg && msg.type === 'EXTRACT') {
     // sendResponse is async-only when we return true below. Background's
     // other handlers are fire-and-forget, so this is the only branch that

@@ -757,6 +757,11 @@ async function handleExtractClick(text, range, dopoPostUrl) {
   });
   const title = text.length > 80 ? text.slice(0, 77) + '…' : text;
 
+  // Clone the live range BEFORE we drop the selection — surroundContents
+  // needs valid boundary points and the await below may invalidate the
+  // selection if the user clicks elsewhere mid-flight.
+  const liveRange = range.cloneRange();
+
   try {
     const res = await chrome.runtime.sendMessage({
       type: 'EXTRACT',
@@ -768,6 +773,7 @@ async function handleExtractClick(text, range, dopoPostUrl) {
     });
     if (res && res.ok) {
       if (UI && UI.showToast) UI.showToast('Extracted → dopo');
+      paintHighlight(liveRange, res.id, dopoPostUrl);
     } else {
       const why = (res && res.error) || 'failed';
       console.warn('[refinery-lite] extract failed:', why);
@@ -779,6 +785,179 @@ async function handleExtractClick(text, range, dopoPostUrl) {
   }
   try { window.getSelection().removeAllRanges(); } catch (_) {}
 }
+
+// ---- in-page highlight: paint + restore ------------------------------------
+//
+// Two entry points, same wrap mechanic:
+//   - paintHighlight(range, …)       — immediately after a successful extract,
+//                                       we still have the live Range.
+//   - restorePieces(convId)          — on chat open, fetch /<id>/pieces from
+//                                       dopo and re-locate each by text search.
+
+const HIGHLIGHT_STYLE_ID = 'rl-extract-style';
+
+function injectHighlightStyle() {
+  if (document.getElementById(HIGHLIGHT_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = HIGHLIGHT_STYLE_ID;
+  style.textContent = `
+    mark.refinery-extract {
+      background: rgba(245, 158, 11, 0.28);
+      color: inherit;
+      border-radius: 2px;
+      padding: 0 1px;
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+    mark.refinery-extract:hover {
+      background: rgba(245, 158, 11, 0.55);
+    }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+// Wrap one Range in <mark>'s — one per intersecting text node so we don't
+// blow up on cross-element selections (Range.surroundContents throws when
+// the boundary points sit inside elements that aren't fully contained).
+function wrapRangeInMarks(range, pieceId, dopoPostUrl) {
+  const marks = [];
+  const ancestor = range.commonAncestorContainer;
+  const root = ancestor.nodeType === Node.TEXT_NODE ? ancestor.parentNode : ancestor;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      return range.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    },
+  });
+  const textNodes = [];
+  let n;
+  while ((n = walker.nextNode())) textNodes.push(n);
+  for (const tn of textNodes) {
+    const r = document.createRange();
+    r.selectNodeContents(tn);
+    if (tn === range.startContainer) r.setStart(tn, range.startOffset);
+    if (tn === range.endContainer)   r.setEnd  (tn, range.endOffset);
+    if (r.collapsed) continue;
+    try {
+      const mark = document.createElement('mark');
+      mark.className = 'refinery-extract';
+      if (pieceId)     mark.dataset.pieceId = pieceId;
+      if (dopoPostUrl) mark.dataset.parentUrl = dopoPostUrl;
+      mark.title = 'Open extract on dopo';
+      r.surroundContents(mark);
+      marks.push(mark);
+    } catch (_) { /* node disappeared mid-flight — skip */ }
+  }
+  return marks;
+}
+
+// Click any segment of a multi-node highlight → open the piece on dopo in
+// a new tab. The piece URL is sibling to the parent (same dopo origin,
+// path = pieceId).
+function attachMarkClickDelegation() {
+  if (document.body.dataset.rlMarkDelegated) return;
+  document.body.dataset.rlMarkDelegated = '1';
+  document.body.addEventListener('click', (e) => {
+    const m = e.target.closest && e.target.closest('mark.refinery-extract');
+    if (!m) return;
+    const parent = m.dataset.parentUrl;
+    const pid    = m.dataset.pieceId;
+    if (!parent || !pid) return;
+    let url;
+    try { url = new URL('/' + pid, parent).toString(); }
+    catch (_) { return; }
+    window.open(url, '_blank');
+  });
+}
+
+function paintHighlight(range, pieceId, dopoPostUrl) {
+  injectHighlightStyle();
+  attachMarkClickDelegation();
+  try { return wrapRangeInMarks(range, pieceId, dopoPostUrl); }
+  catch (e) { console.warn('[refinery-lite] paintHighlight:', e.message); return []; }
+}
+
+// Same multi-node search as dopo's findTextRange but scoped to ChatGPT's
+// message containers — so the count matches what chatOccurrence wrote.
+function findChatRange(text, occurrence) {
+  if (!text) return null;
+  const messages = document.querySelectorAll('[data-message-author-role]');
+  if (!messages.length) return null;
+  const nodes = [];
+  let flat = '';
+  for (const m of messages) {
+    const w = document.createTreeWalker(m, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = w.nextNode())) { nodes.push({ node: n, start: flat.length }); flat += n.data; }
+  }
+  const want = occurrence | 0;
+  let occ = 0, idx = -1;
+  while ((idx = flat.indexOf(text, idx + 1)) !== -1) { if (occ === want) break; occ++; }
+  if (idx < 0 && want > 0) idx = flat.indexOf(text);
+  if (idx < 0) return null;
+  let sN = null, sO = 0, eN = null, eO = 0;
+  for (const nn of nodes) {
+    const end = nn.start + nn.node.data.length;
+    if (!sN && idx < end)            { sN = nn.node; sO = idx - nn.start; }
+    if (idx + text.length <= end)    { eN = nn.node; eO = idx + text.length - nn.start; break; }
+  }
+  if (!sN || !eN) return null;
+  const r = document.createRange();
+  r.setStart(sN, sO); r.setEnd(eN, eO);
+  return r;
+}
+
+let lastRestoredConvId = null;
+
+async function restorePieces(convId) {
+  if (!convId || convId === lastRestoredConvId) return;
+  const got = await chrome.storage.local.get(urlKey(convId));
+  const dopoPostUrl = got[urlKey(convId)];
+  if (!dopoPostUrl) return;
+
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'LIST_PIECES', dopoPostUrl });
+  } catch (e) { return; }
+  if (!res || !res.ok || !Array.isArray(res.pieces) || !res.pieces.length) return;
+
+  // Mark this convId as restored only AFTER we have a non-empty piece list
+  // AND messages are in the DOM. Otherwise a too-early call (DOM not ready)
+  // would wedge us with lastRestoredConvId set but nothing painted.
+  if (!document.querySelector('[data-message-author-role]')) return;
+  lastRestoredConvId = convId;
+
+  injectHighlightStyle();
+  attachMarkClickDelegation();
+
+  let painted = 0;
+  for (const p of res.pieces) {
+    if (!p || !p.id || !p.range) continue;
+    if (document.querySelector(`mark.refinery-extract[data-piece-id="${p.id}"]`)) continue;
+    let d;
+    try { d = JSON.parse(p.range); } catch (_) { continue; }
+    if (!d || d.kind !== 'chatgpt-selection' || !d.text) continue;
+    if (d.conv && d.conv !== convId) continue;
+    const r = findChatRange(d.text, d.occurrence | 0);
+    if (!r) continue;
+    if (wrapRangeInMarks(r, p.id, dopoPostUrl).length) painted++;
+  }
+  if (painted) console.log('[refinery-lite] restored', painted, 'piece(s)');
+}
+
+// Trigger restoration when CONVERSATION fires (tap caught the chat JSON
+// → DOM is about to render). Brief delay lets ChatGPT paint the messages
+// before we walk them.
+const SUBSCRIBE_RESTORE_ONCE = (() => {
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || d.source !== 'refinery-lite' || d.type !== 'CONVERSATION') return;
+    const cid = d.data && d.data.conversation_id;
+    if (!cid) return;
+    setTimeout(() => restorePieces(cid).catch(() => {}), 1500);
+  });
+  return true;
+})();
 
 installExtractButton();
 
