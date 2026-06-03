@@ -200,7 +200,12 @@ async function handleUpload(data, tabId) {
 
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (msg && msg.type === 'UPLOAD' && msg.data) {
-    handleUpload(msg.data, sender && sender.tab && sender.tab.id);
+    const convId = msg.data.conversation_id || 'unknown';
+    const tabId  = sender && sender.tab && sender.tab.id;
+    console.log('[refinery-lite] UPLOAD received', convId, 'tab', tabId);
+    Promise.resolve()
+      .then(() => handleUpload(msg.data, tabId))
+      .catch((e) => console.error('[refinery-lite] handleUpload threw', convId, '—', e.message));
   }
   if (msg && msg.type === 'START_WALKER') {
     // relay from popup → active chatgpt tab's bridge

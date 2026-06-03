@@ -124,8 +124,12 @@ async function getAccessToken(force = false) {
 // On main-area spinner-stop, ChatGPT itself doesn't re-fetch the conversation
 // (the new turn is already streamed into the page state). We do it ourselves
 // so the active chat picks up its new turn without the user navigating away.
+// Returns true if a valid UPLOAD was sent (data fetched, mapping present),
+// false if the fetch itself failed. Walker uses the result to decide
+// whether a subsequent UPLOAD_DONE timeout means "really broken" (false)
+// or "background just slow" (true).
 async function refetchAndResync(convId) {
-  if (!convId || refetchInFlight.has(convId)) return;
+  if (!convId || refetchInFlight.has(convId)) return false;
   refetchInFlight.add(convId);
   try {
     let token;
@@ -133,7 +137,7 @@ async function refetchAndResync(convId) {
       token = await getAccessToken();
     } catch (e) {
       console.warn('[refinery-lite] refetch', convId, '— auth/session failed:', e.message);
-      return;
+      return false;
     }
     const url = '/backend-api/conversation/' + convId;
     let res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
@@ -144,28 +148,29 @@ async function refetchAndResync(convId) {
     }
     if (!res.ok) {
       console.warn('[refinery-lite] refetch', convId, '— HTTP', res.status, res.statusText);
-      return;
+      return false;
     }
     let data;
     try { data = await res.json(); }
     catch (e) {
       console.warn('[refinery-lite] refetch', convId, '— JSON parse failed:', e.message);
-      return;
+      return false;
     }
-    if (!data) {
-      console.warn('[refinery-lite] refetch', convId, '— null body');
-      return;
-    }
-    if (!data.mapping) {
+    if (!data || !data.mapping) {
       console.warn('[refinery-lite] refetch', convId, '— no .mapping; keys:',
-                   Object.keys(data).slice(0, 10).join(','));
-      return;
+                   data ? Object.keys(data).slice(0, 10).join(',') : '(null)');
+      return false;
     }
-    chrome.runtime
-      .sendMessage({ type: 'UPLOAD', data })
-      .catch((e) => console.warn('[refinery-lite] refetch', convId, '— sendMessage:', e.message));
+    try {
+      await chrome.runtime.sendMessage({ type: 'UPLOAD', data });
+    } catch (e) {
+      console.warn('[refinery-lite] refetch', convId, '— sendMessage:', e.message);
+      return false;
+    }
+    return true;
   } catch (e) {
     console.warn('[refinery-lite] refetch', convId, '— unexpected:', e.message);
+    return false;
   } finally {
     refetchInFlight.delete(convId);
   }
@@ -525,21 +530,26 @@ async function runWalker(opts = {}) {
       // would falsely flag the chat as broken. refetchAndResync calls the
       // backend directly via /api/auth/session → Bearer token → /conv/<id>
       // and pushes the result through the same UPLOAD pipeline.
-      refetchAndResync(next.conversationId);
+      const fetched = await refetchAndResync(next.conversationId);
       // 60s timeout covers: /api/auth/session + /backend-api/conversation
       // + parse + (per file: chatgpt download → dopo upload, in parallel)
       // + dopo POST. Generous for very long chats with many attachments.
       const result = await waitForUploadDone(next.conversationId, 60000);
       if (result && !result.error) {
         okCount++;
-      } else {
+      } else if (fetched && !result) {
+        // We DID fetch the conversation and queue UPLOAD; background just
+        // hasn't responded yet (probably slow upload of many files). Do
+        // NOT mark broken — when background finally finishes, it'll clear
+        // any state and the chat will show ✓ on next refresh.
         failCount++;
-        const why = result ? result.error : 'timeout (tap never fired — broken chat?)';
+        console.warn('[refinery-lite] walker: slow', next.conversationId,
+                     '— UPLOAD queued but no UPLOAD_DONE in 60s; background may still finish');
+      } else {
+        // Genuine failure: refetch couldn't even get the JSON. Mark broken.
+        failCount++;
+        const why = result ? result.error : 'refetch failed before UPLOAD';
         console.warn('[refinery-lite] walker: failed', next.conversationId, '—', why);
-        // Mark broken with a fresh timestamp. Walker won't retry within
-        // BROKEN_RETRY_S; after that, this chat gets another chance —
-        // chatGPT-side hiccups self-heal. The red ✗ badge shows until
-        // a successful sync (background.js clears broken_<id> then).
         const nowTs = Math.floor(Date.now() / 1000);
         broken.set(next.conversationId, nowTs);
         try { await chrome.storage.local.set({ ['broken_' + next.conversationId]: nowTs }); }
